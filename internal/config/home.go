@@ -149,6 +149,7 @@ const exampleTemplate = `{
   "tui": "tui.json",
   "sandbox": {"network": true},
   "goal": {"tokenBudget": 100000},
+  "update": {"repo": "youverus/atlas"},
   "providers": {
     "deepseek": {
       "api": "openai-completions",

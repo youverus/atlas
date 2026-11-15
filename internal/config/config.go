@@ -129,6 +129,12 @@ type Config struct {
 	// it on and expects the defaults.
 	Goal *Goal `json:"goal"`
 
+	// Update configures the release check and /update. A pointer because "no
+	// update settings" and "an empty update block" are different statements:
+	// omitting the block checks the built-in release repository, while an
+	// empty block is a reader who turned it on and expects the defaults.
+	Update *Update `json:"update"`
+
 	// UI is the contents of the file TUI names, filled by Load. It carries no
 	// JSON tags of its own: config.json cannot set these fields, so a reader
 	// looking for a color or a gap has exactly one place to look.
@@ -538,6 +544,24 @@ func (g Goal) validate() error {
 	return nil
 }
 
+// Update configures the release check and /update.
+type Update struct {
+	// Repo is the GitHub repository the release check and /update read, as
+	// "owner/name". Empty means the built-in atlas release repository.
+	Repo string `json:"repo"`
+}
+
+func (u Update) validate() error {
+	if u.Repo == "" {
+		return nil
+	}
+	parts := strings.Split(u.Repo, "/")
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		return fmt.Errorf("repo %q must be written as owner/name", u.Repo)
+	}
+	return nil
+}
+
 // Provider is one endpoint and its models. The name it is keyed by is the
 // provider half of "provider/model".
 type Provider struct {
@@ -821,6 +845,11 @@ func (c *Config) Validate() error {
 	if c.Goal != nil {
 		if err := c.Goal.validate(); err != nil {
 			return fmt.Errorf("goal: %w", err)
+		}
+	}
+	if c.Update != nil {
+		if err := c.Update.validate(); err != nil {
+			return fmt.Errorf("update: %w", err)
 		}
 	}
 	// The appearance is checked as one thing: the theme's shape and the

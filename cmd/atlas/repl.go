@@ -163,6 +163,15 @@ func replCommand(ctx context.Context, application *app.App, side *sideState, lin
 		return false, err
 	case "/goal":
 		return false, goalCommand(ctx, application, fields[1:], pick, out, turn)
+	case "/update":
+		if len(fields) > 1 {
+			return false, errors.New("/update takes no argument; it downloads the newest release")
+		}
+		exePath, err := updateExecutable()
+		if err != nil {
+			return false, fmt.Errorf("/update: %w", err)
+		}
+		return false, updateCommand(ctx, pick, out, updateRepo, exePath, updateClient())
 	case "/new":
 		if err := application.NewSession(); err != nil {
 			return false, err
@@ -234,6 +243,7 @@ var commands = []command{
 	{"/compact", "[note]", "summarize and drop older history"},
 	{"/continue", "", "resume the turn that was interrupted"},
 	{"/goal", "[<objective>|pause|resume|clear]", "set, show, pause, resume or clear the session's goal"},
+	{"/update", "", "download and install the newest atlas release"},
 	{"/new", "", "start a new session in this directory"},
 	{"/resume", "[<path|id>]", "continue a recorded session"},
 	{recoverTrigger, "[<id>]", "open a session you archived"},

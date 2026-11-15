@@ -101,6 +101,20 @@ func runTUI(ctx context.Context, application *app.App, side *sideState, servers 
 		<-ctx.Done()
 		program.Quit()
 	}()
+	// The release check runs on its own so a slow or unreachable network never
+	// delays the first frame. A newer release is reported as a flash on the
+	// home screen, where the update command is one line away; an older one and
+	// a failed check both stay silent, because the session must not open with
+	// an error nobody asked for.
+	go func() {
+		checkCtx, cancel := context.WithTimeout(ctx, updateTimeout)
+		defer cancel()
+		newest, err := checkUpdate(checkCtx, updateClient(), updateRepo)
+		if err != nil || newest == "" {
+			return
+		}
+		program.Send(tui.FlashMsg{Text: fmt.Sprintf("atlas %s is available — /update to install", newest)})
+	}()
 	_, err = program.Run()
 	return err
 }
