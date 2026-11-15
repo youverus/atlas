@@ -1,0 +1,66 @@
+{
+  "model": "claude-x",
+  "max_tokens": 8192,
+  "system": [
+    { "type": "text", "text": "You are a test agent." }
+  ],
+  "messages": [
+    {
+      "role": "user",
+      "content": [
+        { "type": "text", "text": "Look at this" },
+        {
+          "type": "image",
+          "source": { "type": "base64", "media_type": "image/png", "data": "aGk=" }
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        { "type": "thinking", "thinking": "Need the file", "signature": "sig-1" },
+        { "type": "text", "text": "Reading." },
+        { "type": "tool_use", "id": "call_1", "name": "read", "input": { "path": "a.go" } }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "call_1",
+          "content": [
+            { "type": "text", "text": "package a" },
+            {
+              "type": "image",
+              "source": { "type": "base64", "media_type": "image/jpeg", "data": "aGk=" }
+            }
+          ]
+        },
+        { "type": "tool_result", "tool_use_id": "call_2", "content": "not found", "is_error": true }
+      ]
+    },
+    { "role": "user", "content": "Thanks" }
+  ],
+  "tools": [
+    {
+      "name": "read",
+      "description": "Read a file",
+      "input_schema": {
+        "type": "object",
+        "properties": { "path": { "type": "string" } },
+        "required": ["path"]
+      }
+    },
+    {
+      "name": "grep",
+      "description": "Search files",
+      "input_schema": {
+        "type": "object",
+        "properties": { "pattern": { "type": "string" } },
+        "required": ["pattern"]
+      }
+    }
+  ],
+  "stream": true
+}

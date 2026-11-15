@@ -1,0 +1,4 @@
+data: {"candidates":[{"content":{"parts":[{"text":"Checking."}],"role":"model"},"index":0}]}
+
+data: {"candidates":[{"content":{"parts":[{"functionCall":{"name":"read","args":{"path":"a.go"},"id":"read_1"},"thoughtSignature":"c2lnLWM="}],"role":"model"},"finishReason":"STOP","index":0}],"usageMetadata":{"promptTokenCount":30,"candidatesTokenCount":20,"totalTokenCount":50}}
+

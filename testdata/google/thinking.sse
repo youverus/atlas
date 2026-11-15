@@ -1,0 +1,6 @@
+data: {"candidates":[{"content":{"parts":[{"text":"Let me ","thought":true}],"role":"model"},"index":0}]}
+
+data: {"candidates":[{"content":{"parts":[{"text":"think","thought":true,"thoughtSignature":"c2lnLWE="}],"role":"model"},"index":0}]}
+
+data: {"candidates":[{"content":{"parts":[{"text":"Done","thoughtSignature":"c2lnLWI="}],"role":"model"},"finishReason":"STOP","index":0}],"usageMetadata":{"promptTokenCount":20,"candidatesTokenCount":4,"thoughtsTokenCount":8,"totalTokenCount":32}}
+

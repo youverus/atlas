@@ -1,0 +1,5 @@
+event: response.created
+data: {"type":"response.created","response":{"id":"resp_7","status":"in_progress","output":[]}}
+
+event: error
+data: {"type":"error","code":"rate_limit_exceeded","message":"slow down"}

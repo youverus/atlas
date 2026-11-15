@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "mode": "dark",
+  "colors": {
+    "text": "#c0caf5",
+    "dim": "#565f89",
+    "accent": "#7aa2f7",
+    "border": "#3b4261",
+    "ok": "#9ece6a",
+    "warn": "#e0af68",
+    "error": "#f7768e",
+    "user": "#7dcfff",
+    "tool": "#bb9af7",
+    "code": "#73daca",
+    "selection": "#2a2f4a",
+    "background": "#1a1b26"
+  }
+}

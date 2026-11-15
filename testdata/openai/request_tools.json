@@ -1,0 +1,38 @@
+{
+  "model": "gpt-x",
+  "messages": [
+    { "role": "system", "content": "You are pi." },
+    { "role": "user", "content": "hello" },
+    {
+      "role": "assistant",
+      "content": "working",
+      "tool_calls": [
+        {
+          "id": "call_1",
+          "type": "function",
+          "function": { "name": "echo", "arguments": "{\"text\":\"hi\"}" }
+        }
+      ]
+    },
+    { "role": "tool", "content": "echo: hi", "tool_call_id": "call_1" },
+    { "role": "user", "content": "again" }
+  ],
+  "stream": true,
+  "stream_options": { "include_usage": true },
+  "temperature": 0.2,
+  "max_completion_tokens": 64,
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "echo",
+        "description": "Echo the input back.",
+        "parameters": {
+          "type": "object",
+          "properties": { "text": { "type": "string" } },
+          "required": ["text"]
+        }
+      }
+    }
+  ]
+}

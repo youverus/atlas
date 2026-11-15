@@ -1,0 +1,24 @@
+: leading comment, dispatches nothing
+
+event: alpha
+data: first
+data: second
+
+data:nospace
+
+id: 42
+retry: 3000
+data: with-meta
+
+event: multi
+data: {"a":1}
+: comment between fields
+data: {"b":2}
+
+retry: soon
+unknown: field
+data: kept
+
+event: orphan
+
+data: final-unterminated

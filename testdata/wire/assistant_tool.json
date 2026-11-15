@@ -1,0 +1,44 @@
+{
+  "role": "assistant",
+  "content": [
+    {
+      "type": "thinking",
+      "thinking": "check the file",
+      "thinkingSignature": "sig-1"
+    },
+    {
+      "type": "text",
+      "text": "Let me look."
+    },
+    {
+      "type": "toolCall",
+      "id": "call_1",
+      "name": "read",
+      "arguments": { "path": "a.txt" }
+    }
+  ],
+  "api": "anthropic-messages",
+  "provider": "anthropic",
+  "model": "claude-sonnet-4-5",
+  "responseModel": "claude-sonnet-4-5-20250929",
+  "responseId": "msg_1",
+  "usage": {
+    "input": 120,
+    "output": 30,
+    "cacheRead": 10,
+    "cacheWrite": 0,
+    "reasoning": 5,
+    "totalTokens": 150,
+    "cost": {
+      "input": 0.00036,
+      "output": 0.00045,
+      "cacheRead": 0.000003,
+      "cacheWrite": 0,
+      "total": 0.000813
+    }
+  },
+  "stopReason": "toolUse",
+  "endTurn": true,
+  "timestamp": 1730000000000,
+  "durationMs": 1234
+}

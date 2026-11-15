@@ -1,0 +1,2 @@
+data: {"candidates":[{"content":{"parts":[{"text":"Long"}],"role":"model"},"finishReason":"MAX_TOKENS","index":0}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":99,"totalTokenCount":109}}
+

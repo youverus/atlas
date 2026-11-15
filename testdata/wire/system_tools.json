@@ -1,0 +1,22 @@
+{
+  "role": "system",
+  "content": "You are a coding agent.",
+  "sections": {
+    "rules": "Be concise.",
+    "style": null
+  },
+  "toolsAdded": [
+    {
+      "name": "read",
+      "description": "Read a file",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "path": { "type": "string" }
+        },
+        "required": ["path"]
+      }
+    }
+  ],
+  "timestamp": 0
+}
