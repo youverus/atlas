@@ -581,6 +581,9 @@ func (m Model) click(mouse tea.Mouse) (Model, tea.Cmd) {
 	if mouse.Button != tea.MouseLeft || m.modal() {
 		return m, nil
 	}
+	if m.downArrowAt(mouse.X, mouse.Y) {
+		return m.jumpToNewest()
+	}
 	row, ok := m.transcriptRow(mouse.Y)
 	if !ok {
 		// A press below the transcript is not a selection: there is nothing
@@ -593,6 +596,26 @@ func (m Model) click(mouse tea.Mouse) (Model, tea.Cmd) {
 		cursor: point{row: row, cell: mouse.X},
 		held:   true,
 	}
+	return m, nil
+}
+
+// downArrowAt reports that the pointer is on the arrow drawn when the window
+// has scrolled back into the conversation: the last cell of the last row of
+// the body. The arithmetic mirrors the one downArrowLine uses, and the pair
+// has to agree — a click on a cell the frame never painted would be a press
+// the reader cannot see land.
+func (m *Model) downArrowAt(x, y int) bool {
+	return m.activeView().offset > 0 && y == m.bodyHeight()-1 && x == m.width-1
+}
+
+// jumpToNewest scrolls the window back to the newest message. The offset is
+// the distance from the newest row, and the selection is cleared because it
+// named words in the history the jump left: left in place it would paint
+// unrelated words over the rows now on screen.
+func (m Model) jumpToNewest() (Model, tea.Cmd) {
+	v := m.activeView()
+	v.offset = 0
+	v.sel.clear()
 	return m, nil
 }
 
@@ -1704,6 +1727,9 @@ func (m Model) View() tea.View {
 		return tea.NewView("")
 	}
 	lines := m.bodyLines()
+	if m.activeView().offset > 0 {
+		lines[len(lines)-1] = m.downArrowLine(lines[len(lines)-1])
+	}
 	for i := 0; i < m.cfg.Layout.ComposerGap; i++ {
 		lines = append(lines, "")
 	}
@@ -1764,6 +1790,48 @@ func (m *Model) bodyLines() []string {
 		window = append(window, m.markRow(lines[row], row))
 	}
 	return window
+}
+
+// downArrowLine puts the jump-to-newest arrow in the last cell of the last
+// row of the body. The row is walked as graphemes so that a wide grapheme
+// covering the arrow's cell is dropped whole: cutting it would leave half a
+// glyph on screen, and the half that stayed would say a word the reader
+// cannot read.
+func (m *Model) downArrowLine(line string) string {
+	var out strings.Builder
+	out.Grow(m.width + 16)
+	state := byte(0)
+	cell := 0
+	for rest := line; rest != ""; {
+		// nil for the parser: the parameters of each sequence are of no
+		// interest, only how wide the grapheme it carries is.
+		seq, width, n, newState := xansi.DecodeSequence(rest, state, nil)
+		if n <= 0 {
+			break
+		}
+		state = newState
+		rest = rest[n:]
+		if width == 0 {
+			// An escape or a control byte: it paints no cell, so it is
+			// kept as part of whatever follows.
+			out.WriteString(seq)
+			continue
+		}
+		if cell+width > m.width-1 {
+			// The grapheme covers the arrow's cell: it is dropped whole,
+			// and so is everything after it, which would only be drawn
+			// past the arrow. The cells it would have taken are filled by
+			// the gap below.
+			break
+		}
+		out.WriteString(seq)
+		cell += width
+	}
+	if gap := m.width - 1 - cell; gap > 0 {
+		out.WriteString(m.cfg.Styles.Background.Render(strings.Repeat(" ", gap)))
+	}
+	out.WriteString(m.cfg.Styles.Panel().Accent.Render("↓"))
+	return out.String()
 }
 
 // markRow paints the cells of one transcript row that the selection covers, and
