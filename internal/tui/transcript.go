@@ -149,30 +149,30 @@ func (t *Transcript) Reset() {
 	}
 }
 
-// replayWindowSpans is how many stretches of a replayed conversation are drawn
-// at once. A live turn appends and draws as it goes; a resumed session arrives
-// as a burst of closed answers, and the burst is the thing that has to be
-// bounded — an appending transcript is cheap at every step, a replayed one is
-// not, because each intermediate frame redraws everything appended so far.
-const replayWindowSpans = 64
-
 // revealChunkSpans is how many held-back stretches one scroll to the top of the
 // window reveals. The chunk is a screenful or two of older conversation rather
 // than a page: meeting the history gradually is what makes the reader unable to
 // tell it was ever missing.
 const revealChunkSpans = 32
 
-// Trim keeps only the last keep spans rendered. The transcript still holds the
-// rest: scrolling to the top of the window reveals it again.
-func (t *Transcript) Trim(keep int) {
-	if keep < 0 {
-		keep = 0
+// TrimAnswer keeps only the newest answer and whatever follows it drawn. The
+// transcript still holds the rest: scrolling to the top of the window reveals
+// it again.
+//
+// A resumed session arrives as a burst of closed answers, and each
+// intermediate frame would redraw everything appended so far. The newest
+// answer is the one message the reader came back for, so it is the whole of
+// the first window: one answer is cheap to draw at every step of the burst,
+// where a window of fixed span count is not — sixty-four short answers are
+// still sixty-four answers.
+func (t *Transcript) TrimAnswer() {
+	for i := len(t.spans) - 1; i >= 0; i-- {
+		if t.blocks[t.spans[i].First].Role == RoleAnswer {
+			t.reveal = i
+			return
+		}
 	}
-	if len(t.spans) <= keep {
-		t.reveal = 0
-		return
-	}
-	t.reveal = len(t.spans) - keep
+	t.reveal = 0
 }
 
 // Hidden reports how many spans are held back above the rendered window.

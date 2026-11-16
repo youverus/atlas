@@ -208,6 +208,17 @@ func TestTheScreenIsPaintedFromEdgeToEdge(t *testing.T) {
 			t.Fatalf("row %d has %d cells, want %d: %q", index, len(cells), m.width, row)
 		}
 		for column, got := range cells {
+			if m.upArrowAt(column, index) || m.downArrowAt(column, index) {
+				// The arrows own their cell and sit on the raised surface, the
+				// same one the input area has: they read as controls rather
+				// than as prose on the screen. The invariant — every cell
+				// carries a background — still holds, only the color is the
+				// surface's.
+				if got != surface {
+					t.Fatalf("row %d column %d carries background %q, want the raised surface %q for the arrow: %q", index, column, got, surface, row)
+				}
+				continue
+			}
 			if got != want {
 				t.Fatalf("row %d column %d carries background %q, want %q: %q", index, column, got, want, row)
 			}

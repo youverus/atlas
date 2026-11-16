@@ -434,9 +434,9 @@ func (m Model) handle(msg tea.Msg) (Model, tea.Cmd) {
 		m.view(m.active).transcript.Append(Block{Role: RoleAnswer, Text: msg.Text})
 		// A resumed session arrives as a burst of closed answers, and each
 		// intermediate frame would redraw everything appended so far. The
-		// window keeps only the newest stretches drawn; the rest is met by
+		// window keeps only the newest answer drawn; the rest is met by
 		// scrolling to the top.
-		m.view(m.active).transcript.Trim(replayWindowSpans)
+		m.view(m.active).transcript.TrimAnswer()
 		return m, m.repaint()
 	case clearRequest:
 		m.host.armed = false
@@ -584,6 +584,9 @@ func (m Model) click(mouse tea.Mouse) (Model, tea.Cmd) {
 	if m.downArrowAt(mouse.X, mouse.Y) {
 		return m.jumpToNewest()
 	}
+	if m.upArrowAt(mouse.X, mouse.Y) {
+		return m.jumpToOldest()
+	}
 	row, ok := m.transcriptRow(mouse.Y)
 	if !ok {
 		// A press below the transcript is not a selection: there is nothing
@@ -601,11 +604,21 @@ func (m Model) click(mouse tea.Mouse) (Model, tea.Cmd) {
 
 // downArrowAt reports that the pointer is on the arrow drawn when the window
 // has scrolled back into the conversation: the last cell of the last row of
-// the body. The arithmetic mirrors the one downArrowLine uses, and the pair
+// the body. The arithmetic mirrors the one arrowLine uses, and the pair
 // has to agree — a click on a cell the frame never painted would be a press
 // the reader cannot see land.
 func (m *Model) downArrowAt(x, y int) bool {
 	return m.activeView().offset > 0 && y == m.bodyHeight()-1 && x == m.width-1
+}
+
+// upArrowAt reports that the pointer is on the arrow drawn when the window
+// still holds older conversation back or has scrolled off the first row: the
+// last cell of the first row of the body. The arithmetic mirrors the one
+// arrowLine uses, and the pair has to agree — a click on a cell the frame
+// never painted would be a press the reader cannot see land.
+func (m *Model) upArrowAt(x, y int) bool {
+	v := m.activeView()
+	return (v.transcript.Hidden() > 0 || v.offset > 0) && y == 0 && x == m.width-1
 }
 
 // jumpToNewest scrolls the window back to the newest message. The offset is
@@ -615,6 +628,21 @@ func (m *Model) downArrowAt(x, y int) bool {
 func (m Model) jumpToNewest() (Model, tea.Cmd) {
 	v := m.activeView()
 	v.offset = 0
+	v.sel.clear()
+	return m, nil
+}
+
+// jumpToOldest shows the whole conversation and scrolls to its first row.
+// The held-back stretches are released in chunks first: the first row has a
+// place to scroll to only once nothing is hidden, and the offset is the
+// distance from the newest row of that whole. The selection is cleared
+// because it named words in the history the jump left.
+func (m Model) jumpToOldest() (Model, tea.Cmd) {
+	v := m.activeView()
+	for v.transcript.Hidden() > 0 {
+		v.transcript.Reveal(revealChunkSpans)
+	}
+	v.offset = m.maxOffset()
 	v.sel.clear()
 	return m, nil
 }
@@ -1727,8 +1755,14 @@ func (m Model) View() tea.View {
 		return tea.NewView("")
 	}
 	lines := m.bodyLines()
+	// The up arrow goes first so that a body one row tall, where both arrows
+	// claim the same cell, keeps the down arrow: the way to the newest message
+	// is the one worth the last word.
+	if m.activeView().transcript.Hidden() > 0 || m.activeView().offset > 0 {
+		lines[0] = m.arrowLine(lines[0], "↑")
+	}
 	if m.activeView().offset > 0 {
-		lines[len(lines)-1] = m.downArrowLine(lines[len(lines)-1])
+		lines[len(lines)-1] = m.arrowLine(lines[len(lines)-1], "↓")
 	}
 	for i := 0; i < m.cfg.Layout.ComposerGap; i++ {
 		lines = append(lines, "")
@@ -1792,12 +1826,11 @@ func (m *Model) bodyLines() []string {
 	return window
 }
 
-// downArrowLine puts the jump-to-newest arrow in the last cell of the last
-// row of the body. The row is walked as graphemes so that a wide grapheme
-// covering the arrow's cell is dropped whole: cutting it would leave half a
-// glyph on screen, and the half that stayed would say a word the reader
-// cannot read.
-func (m *Model) downArrowLine(line string) string {
+// arrowLine puts an arrow in the last cell of a row of the body. The row is
+// walked as graphemes so that a wide grapheme covering the arrow's cell is
+// dropped whole: cutting it would leave half a glyph on screen, and the half
+// that stayed would say a word the reader cannot read.
+func (m *Model) arrowLine(line, arrow string) string {
 	var out strings.Builder
 	out.Grow(m.width + 16)
 	state := byte(0)
@@ -1830,7 +1863,7 @@ func (m *Model) downArrowLine(line string) string {
 	if gap := m.width - 1 - cell; gap > 0 {
 		out.WriteString(m.cfg.Styles.Background.Render(strings.Repeat(" ", gap)))
 	}
-	out.WriteString(m.cfg.Styles.Panel().Accent.Render("↓"))
+	out.WriteString(m.cfg.Styles.Panel().Accent.Render(arrow))
 	return out.String()
 }
 

@@ -85,7 +85,7 @@ func TestDownArrowLineDropsAStraddlingGlyph(t *testing.T) {
 		t.Fatalf("the fixture is %d cells wide, want %d", got, m.width)
 	}
 
-	got := m.downArrowLine(line)
+	got := m.arrowLine(line, "↓")
 	if strings.Contains(plain(got), "你") {
 		t.Fatalf("the straddling glyph survived: %q", plain(got))
 	}
@@ -101,7 +101,7 @@ func TestDownArrowLineDropsAStraddlingGlyph(t *testing.T) {
 // history, and the arrow still lands on its last cell.
 func TestDownArrowLineFillsAnEmptyRow(t *testing.T) {
 	m := scrolledModel(t)
-	got := m.downArrowLine("")
+	got := m.arrowLine("", "↓")
 	if w := xansi.StringWidth(got); w != m.width {
 		t.Fatalf("the arrow row is %d cells wide, want %d", w, m.width)
 	}
