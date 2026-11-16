@@ -6,7 +6,6 @@ import (
 	"compress/gzip"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -53,24 +52,9 @@ func updateSums(t *testing.T, archive []byte) string {
 	return fmt.Sprintf("%s  %s\n", hex.EncodeToString(digest[:]), updateAssetName())
 }
 
-// updateRelease is the JSON GitHub returns for a release with one asset.
-func updateRelease(tag, assetURL, sumsURL string) string {
-	body, err := json.Marshal(releaseInfo{
-		TagName: tag,
-		Assets: []assetInfo{
-			{Name: updateAssetName(), URL: assetURL},
-			{Name: "SHA256SUMS", URL: sumsURL},
-		},
-	})
-	if err != nil {
-		panic(err)
-	}
-	return string(body)
-}
-
 // rewriteTransport sends every request to one httptest server, keeping the
-// path. The client under test builds api.github.com URLs from a repo name;
-// the transport is what lets a test answer them without a network.
+// path. The client under test builds github.com URLs from a repo name; the
+// transport is what lets a test answer them without a network.
 type rewriteTransport struct {
 	target string
 }
@@ -82,20 +66,19 @@ func (r rewriteTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	return http.DefaultTransport.RoundTrip(clone)
 }
 
-// updateServer serves the release JSON, the archive, and the checksums from
-// one mux. It returns the client whose transport rewrites to it.
+// updateServer serves the release redirect, the archive, and the checksums
+// from one mux, the way github.com's web layer would. It returns the client
+// whose transport rewrites to it.
 func updateServer(t *testing.T, tag string, archive []byte, sums string) (*http.Client, string) {
 	t.Helper()
 	mux := http.NewServeMux()
-	mux.HandleFunc("/repos/test/atlas/releases/latest", func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprint(w, updateRelease(tag,
-			"https://api.github.com/repos/test/atlas/releases/assets/binary",
-			"https://api.github.com/repos/test/atlas/releases/assets/sums"))
+	mux.HandleFunc("/test/atlas/releases/latest", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "https://github.com/test/atlas/releases/tag/"+tag, http.StatusFound)
 	})
-	mux.HandleFunc("/repos/test/atlas/releases/assets/binary", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/test/atlas/releases/download/"+tag+"/"+updateAssetName(), func(w http.ResponseWriter, r *http.Request) {
 		w.Write(archive)
 	})
-	mux.HandleFunc("/repos/test/atlas/releases/assets/sums", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/test/atlas/releases/download/"+tag+"/SHA256SUMS", func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprint(w, sums)
 	})
 	server := httptest.NewServer(mux)
@@ -256,8 +239,8 @@ func TestUpdateCommandRefusesABadChecksum(t *testing.T) {
 // archive cannot upgrade this machine.
 func TestUpdateCommandRefusesAMissingAsset(t *testing.T) {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/repos/test/atlas/releases/latest", func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprint(w, updateRelease("atlas-v99.0.0", "", "https://api.github.com/repos/test/atlas/releases/assets/sums"))
+	mux.HandleFunc("/test/atlas/releases/latest", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "https://github.com/test/atlas/releases/tag/atlas-v99.0.0", http.StatusFound)
 	})
 	server := httptest.NewServer(mux)
 	t.Cleanup(server.Close)
@@ -265,6 +248,46 @@ func TestUpdateCommandRefusesAMissingAsset(t *testing.T) {
 	err := updateCommand(t.Context(), nil, &bytes.Buffer{}, "test/atlas", filepath.Join(t.TempDir(), "atlas"), client)
 	if err == nil || !strings.Contains(err.Error(), updateAssetName()) {
 		t.Fatalf("err = %v, want a missing-asset refusal", err)
+	}
+}
+
+// TestLatestReleaseReadsTheTagFromTheRedirect: the check reads the tag out of
+// the 302 Location and never fetches the release page. This is the fix for
+// the shared-IP 403: the API rate-limits anonymous traffic per IP, the web
+// redirect does not.
+func TestLatestReleaseReadsTheTagFromTheRedirect(t *testing.T) {
+	var fetched bool
+	mux := http.NewServeMux()
+	mux.HandleFunc("/test/atlas/releases/latest", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "https://github.com/test/atlas/releases/tag/atlas-v0.12.25", http.StatusFound)
+	})
+	mux.HandleFunc("/test/atlas/releases/tag/atlas-v0.12.25", func(w http.ResponseWriter, r *http.Request) {
+		fetched = true
+	})
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+	client := &http.Client{Transport: rewriteTransport{target: strings.TrimPrefix(server.URL, "http://")}}
+	info, err := latestRelease(t.Context(), client, "test/atlas")
+	if err != nil || info.TagName != "atlas-v0.12.25" {
+		t.Fatalf("latestRelease = %+v, %v; want the tag from the redirect", info, err)
+	}
+	if fetched {
+		t.Fatalf("the release page was fetched; the redirect alone must answer")
+	}
+}
+
+// TestLatestReleaseRefusesARepoWithoutReleases: a repo with no releases
+// redirects /releases/latest to /releases, and that must not read as a tag.
+func TestLatestReleaseRefusesARepoWithoutReleases(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/test/atlas/releases/latest", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "https://github.com/test/atlas/releases", http.StatusFound)
+	})
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+	client := &http.Client{Transport: rewriteTransport{target: strings.TrimPrefix(server.URL, "http://")}}
+	if _, err := latestRelease(t.Context(), client, "test/atlas"); err == nil {
+		t.Fatalf("latestRelease succeeded, want a refusal for a repo without releases")
 	}
 }
 

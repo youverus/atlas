@@ -9,6 +9,11 @@ package main
 // silently everywhere its credentials do not exist, which is exactly the
 // machine where the reminder matters least.
 //
+// The check reads the tag out of the web redirect (/releases/latest answers
+// 302 with the release page, and the Location header carries the tag) instead
+// of the API: the API rate-limits anonymous traffic per IP — 60 requests an
+// hour — and a shared egress IP burns that quota before the first check.
+//
 // An update replaces the running binary with the one from the release. That
 // is only safe when the archive is what it claims to be, so the download is
 // checked against the release's SHA256SUMS before the rename — a public
@@ -20,12 +25,12 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
+	"path"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -69,38 +74,44 @@ var updateClient = func() *http.Client {
 // direct call so a test can point it at a file it owns.
 var updateExecutable = os.Executable
 
-// releaseInfo is the part of a GitHub release the update reads.
+// releaseInfo is what the update reads about the newest release: the tag.
+// The asset URLs follow from the tag, so the check never lists assets.
 type releaseInfo struct {
-	TagName string      `json:"tag_name"`
-	Assets  []assetInfo `json:"assets"`
+	TagName string
 }
 
-// assetInfo is one file attached to the release.
-type assetInfo struct {
-	Name string `json:"name"`
-	URL  string `json:"browser_download_url"`
-}
-
-// latestRelease reads the newest release of the repository.
+// latestRelease reads the newest release of the repository. It asks the web
+// layer, not the API: GET /releases/latest answers 302 with the release page
+// and the Location header carries the tag. The API rate-limits anonymous
+// traffic per IP (60 an hour) and a shared egress IP exhausts that quota
+// before the first check; the web redirect has no such quota, and one
+// request carries everything the update needs.
 func latestRelease(ctx context.Context, client *http.Client, repo string) (releaseInfo, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
-		fmt.Sprintf("https://api.github.com/repos/%s/releases/latest", repo), nil)
+		fmt.Sprintf("https://github.com/%s/releases/latest", repo), nil)
 	if err != nil {
 		return releaseInfo{}, fmt.Errorf("update: %w", err)
 	}
-	resp, err := client.Do(req)
+	checking := *client
+	var tag string
+	checking.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if strings.Contains(req.URL.Path, "/releases/tag/") {
+			tag = path.Base(req.URL.Path)
+		}
+		return http.ErrUseLastResponse
+	}
+	resp, err := checking.Do(req)
 	if err != nil {
 		return releaseInfo{}, fmt.Errorf("update: check %s: %w", repo, err)
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
+	if tag == "" {
+		if resp.StatusCode >= 300 && resp.StatusCode < 400 {
+			return releaseInfo{}, fmt.Errorf("update: check %s: GitHub has no release to follow", repo)
+		}
 		return releaseInfo{}, fmt.Errorf("update: check %s: GitHub says %s", repo, resp.Status)
 	}
-	var info releaseInfo
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&info); err != nil {
-		return releaseInfo{}, fmt.Errorf("update: decode the release: %w", err)
-	}
-	return info, nil
+	return releaseInfo{TagName: tag}, nil
 }
 
 // parseAtlasVersion reads the version out of a release tag. The tag space of
@@ -198,7 +209,7 @@ func updateCommand(ctx context.Context, pick chooser, out io.Writer, repo, exePa
 		}
 	}
 	fmt.Fprintf(out, "updating atlas %s -> %s\n", version, newest)
-	if err := applyUpdate(ctx, client, info, exePath); err != nil {
+	if err := applyUpdate(ctx, client, repo, info.TagName, exePath); err != nil {
 		return err
 	}
 	fmt.Fprintf(out, "updated to atlas %s; restart atlas to run it\n", newest)
@@ -208,24 +219,13 @@ func updateCommand(ctx context.Context, pick chooser, out io.Writer, repo, exePa
 // applyUpdate downloads the archive for this platform, checks it against the
 // release's SHA256SUMS, and renames it over the running binary. The rename is
 // atomic, so a crash in the middle leaves either the old binary or the new
-// one, never a half-written file.
-func applyUpdate(ctx context.Context, client *http.Client, info releaseInfo, exePath string) error {
+// one, never a half-written file. The asset URLs follow from the tag: the
+// release pipeline names every asset atlas-<GOOS>-<GOARCH>.tar.gz plus
+// SHA256SUMS, so no API listing is needed.
+func applyUpdate(ctx context.Context, client *http.Client, repo, tag, exePath string) error {
 	asset := "atlas-" + runtime.GOOS + "-" + runtime.GOARCH + ".tar.gz"
-	var assetURL, sumsURL string
-	for _, a := range info.Assets {
-		switch a.Name {
-		case asset:
-			assetURL = a.URL
-		case "SHA256SUMS":
-			sumsURL = a.URL
-		}
-	}
-	if assetURL == "" {
-		return fmt.Errorf("/update: the release has no %s asset", asset)
-	}
-	if sumsURL == "" {
-		return errors.New("/update: the release has no SHA256SUMS; refusing to install an unchecked archive")
-	}
+	assetURL := fmt.Sprintf("https://github.com/%s/releases/download/%s/%s", repo, tag, asset)
+	sumsURL := fmt.Sprintf("https://github.com/%s/releases/download/%s/SHA256SUMS", repo, tag)
 
 	dir := filepath.Dir(exePath)
 	archive, err := os.CreateTemp(dir, ".atlas-update-*.tar.gz")
