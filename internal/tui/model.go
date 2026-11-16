@@ -176,6 +176,10 @@ type NoteMsg struct {
 // AnswerMsg replays one answer into the transcript. It carries the text of an
 // answer that happened before this screen existed, so the block it appends is
 // already closed: nothing streams into it.
+//
+// It is the replay path's message — the only producer is writeTranscript in
+// cmd/atlas, and a live turn streams through EventMsg — so trimming the draw
+// window here cannot clip a conversation that is still being written.
 type AnswerMsg struct {
 	Text string
 }
@@ -404,6 +408,10 @@ func (m Model) handle(msg tea.Msg) (Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
+		// A reader looking at the top of the window meets more of the
+		// conversation when the window grows: the extra rows are history, not
+		// blank padding.
+		m.revealIfAtTop()
 		return m, nil
 
 	case tea.PasteMsg:
@@ -424,6 +432,11 @@ func (m Model) handle(msg tea.Msg) (Model, tea.Cmd) {
 	case AnswerMsg:
 		m.host.armed = false
 		m.view(m.active).transcript.Append(Block{Role: RoleAnswer, Text: msg.Text})
+		// A resumed session arrives as a burst of closed answers, and each
+		// intermediate frame would redraw everything appended so far. The
+		// window keeps only the newest stretches drawn; the rest is met by
+		// scrolling to the top.
+		m.view(m.active).transcript.Trim(replayWindowSpans)
 		return m, m.repaint()
 	case clearRequest:
 		m.host.armed = false
@@ -859,6 +872,13 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 
 	case tea.KeyHome:
 		if ctrl {
+			// Home asks for the top of the conversation, and a chunk of it may
+			// still be held back: reveal one and land on the new top. Repeated
+			// presses walk the whole history.
+			if m.activeView().transcript.Hidden() > 0 {
+				m.activeView().transcript.Reveal(revealChunkSpans)
+				m.activeView().sel.clear()
+			}
 			m.activeView().offset = m.maxOffset()
 		} else {
 			composer.Home()
@@ -1390,6 +1410,9 @@ func (m *Model) stepBack() (bool, tea.Cmd) {
 }
 
 func (m *Model) scrollBy(delta int) {
+	if delta > 0 {
+		m.revealIfAtTop()
+	}
 	v := m.activeView()
 	v.offset += delta
 	if v.offset < 0 {
@@ -1398,6 +1421,24 @@ func (m *Model) scrollBy(delta int) {
 	if max := m.maxOffset(); v.offset > max {
 		v.offset = max
 	}
+}
+
+// revealIfAtTop meets the reader's next chunk of held-back history when they
+// are already at the top of the rendered window: scrolling up past the newest
+// kept line is the signal that says "show me more". The reveal prepends rows
+// above the window and the offset is left alone, so the rows on screen keep
+// their places and the older conversation arrives as the reader scrolls up
+// into it rather than as a jump. A selection does not survive it: every row it
+// named now points at different words.
+func (m *Model) revealIfAtTop() {
+	if m.activeView().transcript.Hidden() == 0 {
+		return
+	}
+	if m.activeView().offset < m.maxOffset() {
+		return
+	}
+	m.activeView().transcript.Reveal(revealChunkSpans)
+	m.activeView().sel.clear()
 }
 
 // maxOffset is how far the transcript can be scrolled before its first line

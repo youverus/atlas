@@ -96,6 +96,12 @@ type Transcript struct {
 	// the state have to be decided at the same moment. Appended blocks never
 	// move, which is what lets a span be a pair of indices.
 	spans []Span
+	// reveal is the first span a frame renders. The spans before it are held
+	// back: resuming a session replays its whole conversation as a burst of
+	// closed blocks, and drawing all of it on the first frame bills the reader
+	// for history nobody is looking at. The reader meets the rest a chunk at a
+	// time by scrolling to the top of the window, which moves reveal back.
+	reveal int
 	// Now is the clock the thinking and tool durations are measured with. A
 	// field rather than the package function so a test can pin the elapsed time
 	// instead of sleeping.
@@ -133,12 +139,53 @@ func NewTranscript() Transcript {
 func (t *Transcript) Reset() {
 	t.blocks = nil
 	t.spans = nil
+	t.reveal = 0
 	t.streamed = false
 	t.answer = 0
 	if t.md != nil {
 		// The rows are still valid as markdown, but they are keyed by block
 		// index, and the indices now belong to a different conversation.
 		t.md.forget()
+	}
+}
+
+// replayWindowSpans is how many stretches of a replayed conversation are drawn
+// at once. A live turn appends and draws as it goes; a resumed session arrives
+// as a burst of closed answers, and the burst is the thing that has to be
+// bounded — an appending transcript is cheap at every step, a replayed one is
+// not, because each intermediate frame redraws everything appended so far.
+const replayWindowSpans = 64
+
+// revealChunkSpans is how many held-back stretches one scroll to the top of the
+// window reveals. The chunk is a screenful or two of older conversation rather
+// than a page: meeting the history gradually is what makes the reader unable to
+// tell it was ever missing.
+const revealChunkSpans = 32
+
+// Trim keeps only the last keep spans rendered. The transcript still holds the
+// rest: scrolling to the top of the window reveals it again.
+func (t *Transcript) Trim(keep int) {
+	if keep < 0 {
+		keep = 0
+	}
+	if len(t.spans) <= keep {
+		t.reveal = 0
+		return
+	}
+	t.reveal = len(t.spans) - keep
+}
+
+// Hidden reports how many spans are held back above the rendered window.
+func (t *Transcript) Hidden() int { return t.reveal }
+
+// Reveal moves the top of the rendered window back by up to n spans.
+func (t *Transcript) Reveal(n int) {
+	if n <= 0 || t.reveal == 0 {
+		return
+	}
+	t.reveal -= n
+	if t.reveal < 0 {
+		t.reveal = 0
 	}
 }
 
@@ -330,7 +377,13 @@ const segmentDetailIndent = 2
 // could disagree with the rows it claims to describe.
 type Frame struct {
 	Lines []string
-	// Spans is one entry per stretch, in the order Transcript.Spans holds them.
+	// FirstSpan is the transcript span index of Spans[0]. A frame that starts
+	// mid-conversation — the reveal window holds part of the history back — has
+	// to answer clicks with span indices the transcript itself holds, not with
+	// positions in a shrunken list.
+	FirstSpan int
+	// Spans is one entry per rendered stretch, in the order Transcript.Spans
+	// holds them from FirstSpan on.
 	Spans []SpanRows
 }
 
@@ -342,8 +395,11 @@ type SpanRows struct {
 }
 
 // RowsFor reports the rows of the stretch at index, and false when the index
-// names no stretch of this frame.
+// names no stretch of this frame. The index is a transcript span index, the
+// same one Spans and ToggleSpan use; a window that starts mid-conversation
+// subtracts its own offset.
 func (f Frame) RowsFor(index int) (SpanRows, bool) {
+	index -= f.FirstSpan
 	if index < 0 || index >= len(f.Spans) {
 		return SpanRows{}, false
 	}
@@ -352,23 +408,28 @@ func (f Frame) RowsFor(index int) (SpanRows, bool) {
 
 // SpanAt reports the stretch that drew the row, and false for a row that no
 // stretch drew — the blank line between two of them, or the padding above a
-// short conversation.
+// short conversation. It reports the transcript span index, so the answer is
+// the same whatever part of the history the window starts at.
 func (f Frame) SpanAt(row int) (int, bool) {
 	for index, span := range f.Spans {
 		if row >= span.First && row <= span.Last {
-			return index, true
+			return f.FirstSpan + index, true
 		}
 	}
 	return 0, false
 }
 
-// Lines renders the whole transcript at width. It is called once per frame, so
-// it stays a pure function of the blocks, the width and the layout.
+// Lines renders the revealed part of the transcript at width. It is called
+// once per frame, so it stays a pure function of the blocks, the width and the
+// layout. Spans held back by the reveal window are not drawn.
 func (t *Transcript) Lines(width int, s Styles, l Layout) []string {
 	return t.Frame(width, s, l).Lines
 }
 
-// Frame renders the transcript and reports which rows each stretch took.
+// Frame renders the revealed window of the transcript and reports which rows
+// each stretch took. The window starts at the reveal span: everything before it
+// is held back until the reader scrolls to the top of the window, and a frame
+// never pays for it.
 //
 // The walk is over the stretches rather than over the blocks, because a stretch
 // is what a frame draws — one box, or one line when it is folded — and it is
@@ -378,14 +439,18 @@ func (t *Transcript) Frame(width int, s Styles, l Layout) Frame {
 		width = 4
 	}
 	frame := Frame{
-		Lines: make([]string, 0, len(t.blocks)*3),
-		Spans: make([]SpanRows, 0, len(t.spans)),
+		Lines:     make([]string, 0, len(t.blocks)*3),
+		FirstSpan: t.reveal,
+		Spans:     make([]SpanRows, 0, len(t.spans)-t.reveal),
 	}
 	var previous Role
 	for at, span := range t.spans {
+		if at < t.reveal {
+			continue
+		}
 		blocks := t.blocks[span.First : span.Last+1]
 		role := blocks[0].Role
-		if at > 0 && separates(previous, role, l) {
+		if at > t.reveal && separates(previous, role, l) {
 			for gap := 0; gap < l.BlockGap; gap++ {
 				frame.Lines = append(frame.Lines, "")
 			}
