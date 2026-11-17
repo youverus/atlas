@@ -17,6 +17,7 @@ import (
 	"text/tabwriter"
 
 	"pi-go/internal/app"
+	"pi-go/internal/assembly"
 	"pi-go/internal/config"
 	"pi-go/internal/skill"
 )
@@ -43,7 +44,7 @@ func pluginCommand(application *app.App, out io.Writer) error {
 	// One scan for the whole table, the same one the prompt block and /skill
 	// use, so the count under SKILLS is what this session actually got rather
 	// than what the directory holds.
-	skills, notes := availableSkills(application.Session().Cwd())
+	skills, notes := assembly.AvailableSkills(application.Session().Cwd())
 	for _, note := range notes {
 		fmt.Fprintln(out, "warning:", note)
 	}

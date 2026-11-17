@@ -1,3 +1,5 @@
 # Build output
 /atlas
 /bin/
+# The desktop module's binary is named after its directory
+/desktop/desktop

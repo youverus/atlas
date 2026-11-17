@@ -4,10 +4,13 @@ import (
 	"bytes"
 	"context"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"pi-go/internal/app"
+	"pi-go/internal/assembly"
 	"pi-go/internal/config"
 	"pi-go/internal/provider"
 	"pi-go/internal/session"
@@ -121,8 +124,8 @@ func TestHelpTextMatchesTheCommandTable(t *testing.T) {
 // The commands that do not ask about the prompt do not need a real one, and a
 // source pointed at the working directory would pick up whatever file happens
 // to be there — the machine's, not the test's.
-func emptyPrompts() *promptSource {
-	return &promptSource{builder: promptBuilder{noContext: true, noSkills: true}}
+func emptyPrompts() *assembly.PromptSource {
+	return assembly.NewPrompts("", true, true).Source()
 }
 
 // noGit is the git family with nothing in it. The real one is built from the
@@ -140,11 +143,41 @@ func fixedTools(set []tool.Tool) func() []tool.Tool {
 // workspace and what it holds; a factory is what the app needs, and asking it
 // here keeps every assertion about the same function production uses.
 func workspaceTools(cwd string, webSet, mcpSet []tool.Tool, block *config.Sandbox) []tool.Tool {
-	return toolSet(&config.Config{Sandbox: block}, webSet, fixedTools(mcpSet), noGit, nil, taskWiring{})(cwd)
+	return assembly.ToolSet(&config.Config{Sandbox: block}, webSet, fixedTools(mcpSet), noGit, nil, assembly.TaskWiring{})(cwd)
 }
 
 // workspaceToolsWithSpill is workspaceTools with a destination for output too
 // large for a message, which is what a real session always has.
 func workspaceToolsWithSpill(cwd string, spill *tool.Spill) []tool.Tool {
-	return toolSet(&config.Config{}, nil, nil, noGit, spill, taskWiring{})(cwd)
+	return assembly.ToolSet(&config.Config{}, nil, nil, noGit, spill, assembly.TaskWiring{})(cwd)
+}
+
+// putFile writes one file, creating the directories above it.
+func putFile(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", filepath.Dir(path), err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("write %s: %v", path, err)
+	}
+}
+
+// emptyHome keeps the machine's own directories out of the walk and returns the
+// atlas home it chose: $ATLAS_HOME/skills is one of the roots a skill is read
+// from.
+//
+// HOME is redirected too, and for a different reason: the shared skill root is
+// ~/.agents/skills, which on a machine that runs pi holds real skills. Without
+// this, a developer would see a different prompt than CI and neither would be
+// wrong.
+func emptyHome(t *testing.T) string {
+	t.Helper()
+	home := t.TempDir()
+	user := t.TempDir()
+	t.Setenv("ATLAS_HOME", home)
+	t.Setenv("HOME", user)
+	// os.UserHomeDir reads USERPROFILE on Windows.
+	t.Setenv("USERPROFILE", user)
+	return home
 }

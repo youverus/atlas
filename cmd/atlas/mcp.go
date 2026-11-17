@@ -5,106 +5,26 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"path/filepath"
 	"strings"
 	"text/tabwriter"
-	"time"
 
-	"pi-go/internal/config"
+	"pi-go/internal/assembly"
 	"pi-go/internal/mcp"
-	"pi-go/internal/tool"
 )
 
-// mcpState is the MCP half of a session: the connections, where they were
-// configured, and where an authorization would be kept.
+// mcpState is the MCP half of a session as the terminal spells it: the
+// connections the kernel opened, plus what /mcp needs to describe them and
+// /mcp login needs to start an authorization.
 //
-// The zero value is safe and is what every caller with nothing to connect to
-// passes, which matters because the front ends carry this by value through four
-// layers of call signatures. path is kept even when there are no servers: "there
-// are none" is not actionable without saying where they would go. specs are kept
-// for /mcp login, which has to reach a server this session did not connect to —
-// the one that needs a login is by definition not connected.
+// The connections themselves are the assembly's, because a window connects the
+// same servers from the same file. This type exists only so the two commands
+// below can be methods: a method needs a type of its own, and neither command
+// belongs in a package that a window also imports. The zero value is safe — the
+// embedded pointer's methods are nil-tolerant — and it is what every caller with
+// nothing to connect to passes through four layers of call signatures.
 type mcpState struct {
-	set   *mcp.Set
-	path  string
-	store *mcp.OAuthStore
-	specs []mcp.Spec
+	*assembly.MCPServers
 }
-
-// mcpFor connects to the servers the configuration names.
-//
-// A broken config file is an error and a server that fails to connect is a
-// warning, which is the split webTools makes: the file is something the user
-// wrote and can fix, while one unreachable server is a fact about this machine
-// and only costs its own tools. The warning carries the failure as the client
-// worded it, including the server's stderr tail, because "connection closed" on
-// its own sends the reader to the wrong place.
-func mcpFor(ctx context.Context, cwd string, spill *tool.Spill) (mcpState, []string, error) {
-	home, err := config.DefaultHome()
-	if err != nil {
-		return mcpState{}, nil, err
-	}
-	cfg, err := config.LoadMCP(home, cwd)
-	if err != nil {
-		return mcpState{}, nil, err
-	}
-
-	// One store for the whole session, opened whether or not a server needs it:
-	// /mcp login reads and writes it, and it never fails to open.
-	store := mcp.NewOAuthStore(filepath.Join(home, mcp.OAuthFileName))
-	state := mcpState{path: cfg.Global, store: store}
-	// The notes are what the configuration left out: a plugin that did not
-	// load, a plugin server whose name was taken. They come first, because a
-	// reader who sees an unexpected server list wants the reason before the
-	// list of failures.
-	notes := append([]string(nil), cfg.Notes...)
-	for _, name := range cfg.Missing {
-		notes = append(notes, fmt.Sprintf("mcp: ${%s} is not set, so a server in %s starts with the literal value", name, cfg.Global))
-	}
-	if len(cfg.Servers) == 0 {
-		return state, notes, nil
-	}
-
-	specs := make([]mcp.Spec, 0, len(cfg.Servers))
-	for _, server := range cfg.Servers {
-		spec := mcp.Spec{
-			Name:    server.Name,
-			Command: server.Command,
-			Args:    server.Args,
-			Env:     server.Env,
-			Dir:     server.Cwd,
-			URL:     server.URL,
-			Headers: server.Headers,
-			Timeout: time.Duration(server.Timeout) * time.Second,
-			Tools:   server.Tools,
-		}
-		if server.Auth == "oauth" {
-			spec.OAuth = &mcp.OAuthSpec{Scopes: server.Scopes, Store: store}
-		}
-		specs = append(specs, spec)
-	}
-	state.specs = specs
-	// The identity is this binary's: a server's log saying "atlas 0.7.0" is the
-	// only way to tell which client an entry was tested with.
-	state.set = mcp.Open(ctx, specs, mcp.Identity{Name: "atlas", Version: version})
-	// A result too large for a message is written next to the session, same as
-	// the shell's output: both are "here is the part you could not see", and two
-	// destinations for one idea would be two things to clean up.
-	state.set.Spill = spill
-	return state, append(notes, state.set.Notes()...), nil
-}
-
-// tools returns the remote tools as the model's own, as they are right now. Nil
-// receivers are fine, because a session without MCP is the normal case.
-//
-// It is asked again before every turn rather than once at startup: a server can
-// declare a tool while the session runs, and the client answers that by listing
-// again (docs/mcp.md section 5).
-func (s mcpState) tools() []tool.Tool { return s.set.Tools() }
-
-// close ends every connection. It is deferred at startup, so a session that
-// never connected anything pays nothing.
-func (s mcpState) close() { s.set.Close() }
 
 // report is /mcp. With no argument it lists the servers; with one it lists that
 // server's tools; with "login" it starts an authorization.
@@ -117,7 +37,7 @@ func (s mcpState) report(ctx context.Context, args []string, out io.Writer) erro
 	if isMCPLogin(args) {
 		return s.login(ctx, args[1:], out)
 	}
-	servers := s.set.Servers()
+	servers := s.Servers()
 	if len(args) > 0 {
 		name := strings.Join(args, " ")
 		for _, server := range servers {
@@ -128,7 +48,7 @@ func (s mcpState) report(ctx context.Context, args []string, out io.Writer) erro
 		return fmt.Errorf("/mcp: no server named %q; /mcp lists the configured ones", name)
 	}
 	if len(servers) == 0 {
-		fmt.Fprintf(out, "no MCP servers are configured; they live under \"mcpServers\" in %s\n", s.path)
+		fmt.Fprintf(out, "no MCP servers are configured; they live under \"mcpServers\" in %s\n", s.Path())
 		return nil
 	}
 	return writeMCPServers(out, servers)
@@ -159,7 +79,7 @@ func (s mcpState) login(ctx context.Context, args []string, out io.Writer) error
 		return fmt.Errorf("/mcp: no server named %q; /mcp lists the configured ones", name)
 	}
 	if spec.OAuth == nil {
-		return fmt.Errorf("server %q has no \"auth\": \"oauth\" in %s, so there is nothing to log in to", name, s.path)
+		return fmt.Errorf("server %q has no \"auth\": \"oauth\" in %s, so there is nothing to log in to", name, s.Path())
 	}
 	// Written before the goroutine starts, because both write to the same
 	// writer: the interface turns each line into a notice, and a notice that
@@ -195,7 +115,7 @@ func (s mcpState) login(ctx context.Context, args []string, out io.Writer) error
 // spec returns the connection spec of a configured server. /mcp login needs it for
 // a server this session never connected to, which is the one that needs a login.
 func (s mcpState) spec(name string) (mcp.Spec, bool) {
-	for _, spec := range s.specs {
+	for _, spec := range s.Specs() {
 		if spec.Name == name {
 			return spec, true
 		}

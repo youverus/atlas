@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"pi-go/internal/assembly"
 	"pi-go/internal/config"
 	"pi-go/internal/permission"
 	"pi-go/internal/tui"
@@ -13,7 +14,7 @@ import (
 // permissionState is a side state whose engine is in the given mode, which is
 // what /permission reads and writes.
 func permissionState(mode string) *sideState {
-	return newSideStateWith(permission.New(permission.Options{Mode: mode}))
+	return newSideStateWith(assembly.NewGate(permission.New(permission.Options{Mode: mode})))
 }
 
 // TestPermissionSwitchesTheMode is the runtime switch the four modes were added
@@ -35,7 +36,7 @@ func TestPermissionSwitchesTheMode(t *testing.T) {
 
 	// And the ladder agrees, which is the only part that matters: the engine the
 	// gate consults is the one that changed.
-	if decision := state.engine.Decide(call("write")); decision.Behavior != permission.Allow {
+	if decision := state.gate.Engine().Decide(toolCall("write")); decision.Behavior != permission.Allow {
 		t.Fatalf("after the switch the write is %q, want allow", decision.Behavior)
 	}
 }
@@ -212,12 +213,12 @@ func TestTheFooterCarriesTheMode(t *testing.T) {
 // wins over permission.mode, because a script has no /permission and no prompt.
 func TestThePermissionFlagOverridesTheConfig(t *testing.T) {
 	cfg := &config.Config{Permission: &config.Permission{Mode: config.PermissionModes[0]}}
-	engine, _ := permissionFor(cfg, false, config.Selection{}, permission.ModeOff)
+	engine, _ := assembly.PermissionFor(cfg, false, config.Selection{}, permission.ModeOff)
 	if engine.Mode() != permission.ModeOff {
 		t.Fatalf("mode = %q, want the flag", engine.Mode())
 	}
 	// Without the flag the config decides.
-	engine, _ = permissionFor(cfg, false, config.Selection{}, "")
+	engine, _ = assembly.PermissionFor(cfg, false, config.Selection{}, "")
 	if engine.Mode() != config.PermissionModes[0] {
 		t.Fatalf("mode = %q, want the configured one", engine.Mode())
 	}
@@ -231,48 +232,6 @@ func TestTheFlagRefusesAnUnknownMode(t *testing.T) {
 	}
 	if _, err := parseFlags([]string{"-permission", permission.ModeAuto}); err != nil {
 		t.Fatalf("-permission auto: %v", err)
-	}
-}
-
-// TestAutoWithNoClassifierWarnsAndAsks: config.json can name a model that cannot
-// be built. The engine is then left without a classifier, which is the same
-// fail-closed answer as a classifier that errored — and the note says why rather
-// than leaving an "auto" that silently asks.
-func TestAutoWithNoClassifierWarnsAndAsks(t *testing.T) {
-	cfg := &config.Config{Permission: &config.Permission{
-		Mode:       permission.ModeAuto,
-		Classifier: "nope/model",
-	}}
-	engine, note := permissionFor(cfg, false, config.Selection{}, "")
-	if note == "" || !strings.Contains(note, "nope/model") {
-		t.Fatalf("note = %q, want the unusable classifier named", note)
-	}
-	if engine.Mode() != permission.ModeAuto {
-		t.Fatalf("mode = %q, want auto to stay selected", engine.Mode())
-	}
-}
-
-// TestAutoWithoutAPermissionBlockStillJudges: -permission auto on a config with no
-// permission block at all. The documented rule is that an empty classifier falls
-// back to the model the run started on, and "no block" is the emptiest value there
-// is; returning nil here would make the flag a switch that quietly does nothing.
-func TestAutoWithoutAPermissionBlockStillJudges(t *testing.T) {
-	cfg := &config.Config{}
-	selection := config.Selection{
-		ProviderName: "local",
-		Provider:     config.Provider{API: "openai-completions"},
-		Model:        config.Model{ID: "m", MaxTokens: 4096},
-	}
-	classifier, note := classifierFor(cfg, permission.ModeAuto, selection)
-	if note != "" {
-		t.Fatalf("note = %q, want no warning about a model that builds", note)
-	}
-	if classifier == nil {
-		t.Fatal("auto built no classifier from the starting model")
-	}
-	// Any other mode never asks, so no classifier is the right answer.
-	if built, note := classifierFor(cfg, permission.ModeDefault, selection); built != nil || note != "" {
-		t.Fatalf("classifierFor(default) = %v %q, want nothing", built, note)
 	}
 }
 

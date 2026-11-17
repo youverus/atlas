@@ -75,32 +75,49 @@ atlas -list-models                     # 列出配置里的模型
 
 ## 目录
 
+`go/desktop/` 是**独立的 Go 模块**，不在下面这棵树里：它用 Wails v3 开一个窗口，指向同一进程里起的回环 HTTP 服务（`internal/httpapi`），需要 cgo 与系统 WebView，而 CLI 是 `CGO_ENABLED=0` 交叉编译的四目标。分开之后，内核的 `go vet ./...` 永远不需要 GUI 工具链，Xcode 坏了也拦不住 `atlas` 构建。它的模块路径必须是 `pi-go/desktop`：Go 的 `internal` 规则按导入路径前缀判定，只有以 `pi-go/` 开头的模块才能导入 `pi-go/internal/...`。
+
+```bash
+cd desktop && go build .    # 需要 Xcode CLT 与 CGO_ENABLED=1
+./desktop                   # 窗口里是真实 Turn（-offline 才是脚本化占位）
+```
+
+数据面选回环 HTTP + SSE 而不是外壳私有通道，是为了前端零耦合：同一份页面将来可以放进浏览器、由 `atlas web` 提供，或者塞进任何外壳而不改一行；而审批框要阻塞一个工具 goroutine，在 HTTP 里就是一个普通的阻塞 POST。窗口跑的是真实 Turn：装配已经从 `cmd/atlas` 下沉到可导入的 `internal/assembly`，CLI 与窗口都调 `assembly.New` 拿到同一个 kernel，所以凭据、工具、审批与压缩只有一份实现；`Turn` 就是 `kernel.App.Ask`。
+
 完整索引（每个目录的职责、主要文件、状态）见 [docs/INDEX.md](docs/INDEX.md)。依赖方向速览：
 
 ```
-cmd/atlas ─┬─> internal/config ─> (仅标准库)
-           ├─> internal/app ─┬─> internal/agent ─┬─> internal/provider ─> internal/wire
-           │                 │                   ├─> internal/tool ─> internal/wire
-           │                 │                   │        ├─> internal/tool/echo
-           │                 │                   │        ├─> internal/tool/fs
-           │                 │                   │        └─> internal/tool/shell
-           │                 │                   └─> internal/wire
-           │                 ├─> internal/compact ─> internal/provider, internal/session, internal/wire
-           │                 ├─> internal/session ─> internal/wire
-           │                 └─> internal/wire
-           ├─> internal/classify ─> internal/permission, internal/provider, internal/tool, internal/wire
+cmd/atlas ─┬─> internal/assembly ─┬─> internal/app ─┬─> internal/agent ─┬─> internal/provider ─> internal/wire
+           │                      │                 │                   ├─> internal/tool ─> internal/wire
+           │                      │                 │                   └─> internal/wire
+           │                      │                 ├─> internal/compact ─> internal/provider, internal/session, internal/wire
+           │                      │                 ├─> internal/session ─> internal/wire
+           │                      │                 └─> internal/wire
+           │                      ├─> internal/classify ─> internal/permission, internal/provider, internal/tool, internal/wire
+           │                      ├─> internal/mcp ─> internal/sse, internal/tool, internal/wire
+           │                      ├─> internal/permission ─> internal/tool, internal/wire
+           │                      ├─> internal/provider/anthropic ─> internal/provider, internal/sse, internal/wire
+           │                      ├─> internal/provider/google ─> internal/provider, internal/sse, internal/wire
+           │                      ├─> internal/provider/openai ─> internal/provider, internal/sse, internal/wire
+           │                      ├─> internal/provider/responses ─> internal/provider, internal/sse, internal/wire
+           │                      ├─> internal/sandbox ─> (仅标准库)
+           │                      ├─> internal/session ─> internal/wire
+           │                      ├─> internal/skill ─> (仅标准库)
+           │                      ├─> internal/tool ─> internal/wire
+           │                      └─> internal/wire
+           ├─> internal/config ─> (仅标准库)
            ├─> internal/mcp ─> internal/sse, internal/tool, internal/wire
            ├─> internal/permission ─> internal/tool, internal/wire
-           ├─> internal/provider/anthropic ─> internal/provider, internal/sse, internal/wire
            ├─> internal/provider/faux ─> internal/provider, internal/wire
-           ├─> internal/provider/openai ─> internal/provider, internal/sse, internal/wire
-           ├─> internal/provider/responses ─> internal/provider, internal/sse, internal/wire
            ├─> internal/rpc ─> internal/app, internal/session, internal/wire
-           ├─> internal/sandbox ─> (仅标准库)
            ├─> internal/session ─> internal/wire
            ├─> internal/skill ─> (仅标准库)
            ├─> internal/tool ─> internal/wire
            └─> internal/wire
+
+desktop（独立模块 pi-go/desktop）─┬─> internal/assembly
+                                  ├─> internal/httpapi ─> internal/assembly, internal/wire
+                                  └─> internal/wire
 
 internal/catalog ─> (仅标准库)
 internal/classify ─> internal/permission, internal/provider, internal/tool, internal/wire
@@ -115,10 +132,12 @@ internal/sandbox ─> (仅标准库)
 internal/sse ─> (仅标准库)
 internal/skill ─> (仅标准库)
 internal/theme ─> (仅标准库)
-internal/tui ─> charm.land/bubbletea/v2, glamour/v2, lipgloss/v2
+internal/transcript ─> internal/wire
+internal/httpapi ─> internal/wire
+internal/tui ─> charm.land/bubbletea/v2, glamour/v2, lipgloss/v2, github.com/charmbracelet/x/ansi
 ```
 
-`internal/wire`、`internal/sse`、`internal/config`、`internal/catalog`、`internal/sandbox`、`internal/skill` 与 `internal/theme` 只依赖标准库；`provider` 不认识 `agent` 和 `tool`（`tests/openai/run.sh`、`tests/anthropic/run.sh`、`tests/google/run.sh` 机械检查）；`tool` 不认识 `provider` 和 `agent`；`session` 只依赖 `wire`，不认识模型、工具或循环；`compact` 只依赖 `provider`、`session` 与 `wire`，不认识 `agent`、`tool` 与任何适配器，也不写会话；`classify` 是 `permission` 与 `provider` 之间唯一的桥：`permission` 声明 `Classifier` 接口却不认识适配器（它仍是只依赖 `tool` 的叶子），实现由组合根造好递进 `Options`，和 `web` 的凭据、`sandbox` 的 `Wrap` 是同一个形状；它不认识 `config`（用哪个模型判是 `cmd/atlas` 的事），也不认识 `agent` 与 `session`，因为分类器只看工具名与参数、看不见对话（`tests/classify/run.sh` 机械检查）；`sse` 只做分帧，不认识厂商 JSON（四家适配器与 `mcp` 共用它，所以它在 `internal/` 根下而不在 `provider` 下面）；`mcp` 只依赖 `sse`、`tool` 与 `wire`——协议与传输在它里面，配置解析在 `config`，连接时机与 `/mcp` 在组合根。`fs` 与 `shell` 互不引用，工具之间的组合只发生在 agent 的批次分发里。`sandbox` 也是叶子，但 `shell` 不引用它：接口（`Wrap(argv, env) → (argv, env)`）由 `tool/shell` 声明、实现由 `cmd/atlas` 注入，所以工具层只需要知道"有个东西能改写 argv"，不需要知道那是 Seatbelt 还是容器（`tests/sandbox/run.sh` 机械检查）。`skill` 也是叶子，而且连 `read` 的 50KB / 2000 行上限都是 `cmd/atlas` 递进来的：它不该知道工具在哪，正如工具不该知道配置在哪。`app` 与 `rpc` 都不认识具体适配器：模型由 `Resolver` 注入，换厂商不动编排与传输代码（`tests/app/run.sh`、`tests/rpc/run.sh` 机械检查）；`cmd/atlas` 是全树唯一引用具体适配器的包，也就是组合根（`tests/cli/run.sh` 机械检查）。`internal/tui` 是全树唯一引用第三方的包，而且只看到 `wire` 与 `theme`：它不认识 `app`、`session` 或任何适配器，终端本身（raw mode、alt-screen、窗口尺寸）由 bubbletea 持有，`cmd/atlas` 只负责把 kernel 接上去（见下面「全屏会话」）。`anthropic`、`google`、`openai` 与 `responses` 是平级的兄弟适配器，互不引用：共用 `provider.Frame`、`provider.FailedStream` 与 `sse`，请求形状与 stop reason 表各留一份。`conformance` 只在测试里被引用：它是跨适配器的一致性用例，方向是适配器的测试认识它，不是它认识适配器。
+`internal/wire`、`internal/sse`、`internal/config`、`internal/catalog`、`internal/sandbox`、`internal/skill` 与 `internal/theme` 只依赖标准库；`provider` 不认识 `agent` 和 `tool`（`tests/openai/run.sh`、`tests/anthropic/run.sh`、`tests/google/run.sh` 机械检查）；`tool` 不认识 `provider` 和 `agent`；`session` 只依赖 `wire`，不认识模型、工具或循环；`compact` 只依赖 `provider`、`session` 与 `wire`，不认识 `agent`、`tool` 与任何适配器，也不写会话；`classify` 是 `permission` 与 `provider` 之间唯一的桥：`permission` 声明 `Classifier` 接口却不认识适配器（它仍是只依赖 `tool` 的叶子），实现由组合根造好递进 `Options`，和 `web` 的凭据、`sandbox` 的 `Wrap` 是同一个形状；它不认识 `config`（用哪个模型判是 `internal/assembly` 的事），也不认识 `agent` 与 `session`，因为分类器只看工具名与参数、看不见对话（`tests/classify/run.sh` 机械检查）；`sse` 只做分帧，不认识厂商 JSON（四家适配器与 `mcp` 共用它，所以它在 `internal/` 根下而不在 `provider` 下面）；`mcp` 只依赖 `sse`、`tool` 与 `wire`——协议与传输在它里面，配置解析在 `config`，连接时机与 `/mcp` 在组合根。`fs` 与 `shell` 互不引用，工具之间的组合只发生在 agent 的批次分发里。`sandbox` 也是叶子，但 `shell` 不引用它：接口（`Wrap(argv, env) → (argv, env)`）由 `tool/shell` 声明、实现由 `internal/assembly` 注入，所以工具层只需要知道"有个东西能改写 argv"，不需要知道那是 Seatbelt 还是容器（`tests/sandbox/run.sh` 机械检查）。`skill` 也是叶子，而且连 `read` 的 50KB / 2000 行上限都是 `internal/assembly` 递进来的：它不该知道工具在哪，正如工具不该知道配置在哪。`app` 与 `rpc` 都不认识具体适配器：模型由 `Resolver` 注入，换厂商不动编排与传输代码（`tests/app/run.sh`、`tests/rpc/run.sh` 机械检查）；`internal/assembly` 是全树唯一引用具体适配器的包，也就是组合根；`cmd/atlas` 与 `desktop` 都只是它的前端（`tests/cli/run.sh` 与 `tests/assembly/run.sh` 机械检查）。`internal/tui` 是全树唯一引用第三方的包，而且只看到 `wire`、`theme` 与 `transcript`：它不认识 `app`、`session` 或任何适配器，终端本身（raw mode、alt-screen、窗口尺寸）由 bubbletea 持有，`cmd/atlas` 只负责把 kernel 接上去（见下面「全屏会话」）。`internal/transcript` 是会话模型的唯一一份实现，只依赖 `wire`：把事件流折成块、记住哪几段是折的、历史揭示到哪一条，自己不引第三方也不认识终端——所以折叠能在没有终端的测试里断言，第二个界面读同一批 `Block` 与 `Span` 自己画而不重写它。`anthropic`、`google`、`openai` 与 `responses` 是平级的兄弟适配器，互不引用：共用 `provider.Frame`、`provider.FailedStream` 与 `sse`，请求形状与 stop reason 表各留一份。`conformance` 只在测试里被引用：它是跨适配器的一致性用例，方向是适配器的测试认识它，不是它认识适配器。
 
 ## 配置
 
@@ -951,7 +970,7 @@ err := srv.Serve(ctx, os.Stdin, os.Stdout) // 读到 EOF 结束
 - `atlas` 是 Go 侧新增的形态：pi 有 `--mode print/json/rpc`、`!` 直通 bash、模型与会话选择器；atlas 只有一个二进制、一个全屏会话、一个 `-demo`。界面在 0.4.0 换成了全屏（alt-screen、自有 transcript、审批弹窗、侧会话视图、0.4.1 起有欢迎页与命令面板，0.4.2 起 `/model` 与 `/resume` 有方向键菜单，0.4.4 起模型那一栏还能用 `←`/`→` 转思考档位、回答改成一条贯穿整块的竖线，0.4.5 起侧视图里 `Ctrl+C` 一步退回、侧会话也有自己的首页、自己打的那句用另一种颜色并两侧留白，0.4.6 起一句话没说的会话不再留下文件、离开也不补写，0.4.7 起输入区与对话之间留一行空白、`/archive` `/recover` `/restore` `/delete` 让归档会话不进 `/resume` 但仍然可读，0.4.8 起连按两下 Esc 或 Ctrl-C 才停一轮、停完把排队的行、屏幕上的模态框与工具进程一起收干净，0.4.9 起打开 atlas 不新建会话、`/archive` 之后直接回到欢迎页并把收据写在页上，0.4.10 起间距、颜色与布局都能由文件调——`colors` 叠在主题上、`layout` 0.4.10 是九个键、0.4.11 起十个（多了输入区与状态栏之间的间距），不写就是 0.4.9 那一套，0.4.11 起这些外观设置搬进自己的 `tui.json`，由 `config.json` 的 `"tui"` 引用，一个设置一个家，0.4.12 起审批框多一个"这个工具本次会话不再问"的答案、状态栏末尾有了带秒数的忙碌标记，0.4.13 起几何按屏幕块命名——`blocks` 管区域、`roles` 管 transcript 内的正文块，扁平的十键被拒绝并逐键指路，0.4.14 起菜单与命令面板共用同一份行排版——`▸`、列宽、滑窗规则只剩一处，两张列表不再各自漂移，0.4.15 起整块屏幕有底色、输入区凸成一圈圆角框（框里的底色由 `background` 推一档得到，不是第十三个 token），0.4.16 起一轮结束的收据还报 `tok/s`、这一轮用了多久与几点几分停的，0.4.17 起 atlas 自己在启动时读 cwd 与每一层祖先目录的 `AGENTS.md` / `CLAUDE.md` 拼进系统提示词、`/init` 写完立刻生效、`-no-context-files` 是唯一的退路，0.12.1 起这份提示词每轮重算，装完 skill 或改完 `AGENTS.md` 下一轮就生效，0.12.3 起 `@` 能把文本与图片带进这一轮、全屏会话里还能补全路径，0.12.4 起回答按 markdown 画——表格、围栏代码块、行内样式、六级标题与列表，按 `(宽度, 配色, 文本)` 缓存所以同一宽度重绘不重复解析，0.12.5 起 `/model` 与 `/resume` 的菜单能打字收窄——只搜标签与说明、每个词都要命中、光标留在原来那一行上，零命中时框里说一句而不是空着，0.12.6 起 `/resume --all` 与 `/recover --all` 能把别的项目的会话真的打开——工具集与系统提示词都按会话记录的目录重建，所以切过去之后 bash 的沙箱、`fs` 的边界与 `AGENTS.md` 一起换成那个项目的，屏幕上多一行 `dir:`，0.12.7 起 `/export` 能写三种格式——扩展名定格式（`.md` / `.html` / `.jsonl`），HTML 单文件自包含而回答里的表格与代码块是真的表格与代码块，JSONL 是一个还能 `-resume` 打开的会话文件），0.12.8 起 bash、MCP 与 `webfetch` 被截断时会把全文落进会话桶的 `spill/` 并回一行路径——只有「再问一次也拿不到」的截断才落盘，`read` / `grep` / `ls` / `find` / `websearch` 仍然只是头部截断加一句怎么变窄，与 pi 同型，0.12.9 起有四个只读的 git 工具——`status` / `diff` / `log` / `show` 各一个，只读不是承诺而是构造：每个 token 过一张按子命令写死的 argv 白名单，表外报错而不是被忽略，`--` 之后一律当路径，而 `-c` / `--textconv` / `--ext-diff` 这类会执行外部程序的选项单独拒绝并各带一句理由；它们不套沙箱，代价是自己补上 `git status` 刷新索引那唯一一次写（`GIT_OPTIONAL_LOCKS=0`，有测试比对 `.git/index` 的字节），颜色也从 `GIT_CONFIG_*` 关而不是从 argv 关，因为 `status` 根本没有颜色旗标；0.12.10 起权限有了四档——`Ask`（缺省，逐条问）、`Auto`（没有任何规则可依的 ask 交给 `permission.classifier` 指定的那个模型判，判不了就回来问人）、`Full access`、`Off`（真的关掉闸门，连 deny 规则都不跑），`/permission` 切换、`/permission status` 查看、状态栏把当前档接在工具摘要后面、headless 走 `-permission`；分类器只看工具名与参数、看不见对话，规则型 ask 与 `bypassImmune` 的 ask 一律不交给它，`bypassPermissions` 仍排在所有 ask 之后；仍缺的是把剪贴板里的图直接粘进输入行（`Ctrl+V`）以及一个 `--file` 开关，忙碌标记也只报秒数、不报这一轮正在做什么。0.12.11 起 MCP 的工具表会在会话中途重列——服务器发了 `tools/list_changed` 就在下一轮生效，每台可以写 `tools` 白名单按工具名收窄，`/mcp` 的 TOOLS 列写 `N of M`、表下分别说明「白名单要了但服务器没给」与「上次重列失败、表是旧的」，而重列失败保留旧表、不把那台标成 failed；0.12.13 起一轮因为超窗口而失败时，纯文本路径上那行不再套 `Compaction failed:` 前缀——它自己已经是完整的一句（多少估算 token 装不进多大的窗口，以及两条出路）。0.12.15 起 transcript 的块按段归并——同一角色相邻的框合成一段，点标题行把它折成一行 `▸ <标题>`、`Ctrl+G` 一次全折再按一次全展，鼠标拖过就按单元格选中并复制到剪贴板（高亮用反显而不是 `selection` 底色，因为反显在只认十六色的终端上也成立），`/fork` 还能挑一条旧消息分叉并把那条正文回填进输入行，状态栏的项目名后面挂上 git 分支（`proj (main)`，读 `.git/HEAD` 而不 spawn `git`，worktree 与 detached 也认）。全屏的代价是终端历史缓冲区里不留这次会话，所以"把对话存下来"由 `/export` 负责。
 - 插件只有用户级、没有市场：`$ATLAS_HOME/plugins/<name>/plugin.json` 一个目录声明一组 skill 与几台 MCP 服务器，没有项目级（`<cwd>/.atlas/plugins` 不读）、没有 install / enable / disable、没有版本与签名——停用就是删目录。pi 与 MCode CLI 的插件是带生命周期的包，这里刻意只保留"声明"这一半（`docs/plugins.md`、architecture 第 82 条）。
 - MCP 只做"能连、能列、能调"：pi 的 `exposure` / `toolExposure`（逐工具的暴露档位与通配）与 `description`（进系统提示词的服务器列表）都没有，所以暴露粒度只有「整个服务器」与 `tools` 白名单两级，白名单只能「全有」或「只这些」；`!command` 这种整值凭据也没有。按服务器收窄与 `tools/list_changed` 在 0.12.11 补上：后加的工具下一轮就出现，`/mcp` 的 TOOLS 列因此是 `N of M`。`GET` 长连流与 progress 有，全屏会话里也画得出来（`tool_execution_update` 覆盖在调用行的尾巴上，250ms 一次、折成一行截 60 字），只是 `-prompt` 与管道的纯文本渲染没有这一栏——那一路只往后追加，没有可以覆盖的那一格（`--json` 与 `-rpc` 拿到的仍是每一条原始事件）。OAuth 有，但只有一条路：动态注册加授权码加 PKCE 加刷新，客户端认证只有 `none` 与 `client_secret_basic`，step-up、client credentials、CIMD 与设备码流都不做。项目级文件只能开开关：pi 只在项目被信任时读项目级条目，atlas 没有"信任一个仓库"这一层，于是干脆不许它写 argv 或凭据（`auth`、`scopes` 与 `tools` 一并拒）。`ping` 也不做——每一处需要知道连接是否还活着的地方，要么正握着那把锁，要么已经超时。
-- 配置是一份扁平 JSON，不是 pi 的 settings + models.json + 环境变量三层。目录接在 CLI 与 RPC 两处（窗口、输出上限、模态与档位轴，配置里写了的优先，规则见 [docs/catalog.md](docs/catalog.md)）：`-list-models`、`/model` 菜单、`-thinking`、`get_available_models`、`cycle_model` 与 `set_thinking_level` 读的是同一个 `factsOf`。配置本身仍是扁平的：没有整份 models.dev 的生成器，"可用模型表"就是配置里声明的那几个（组合根把它填进 `app.Config.Models`），也没有"临时发现一个本机模型"的路。
+- 配置是一份扁平 JSON，不是 pi 的 settings + models.json + 环境变量三层。目录接在 CLI、RPC 与窗口三处（窗口、输出上限、模态与档位轴，配置里写了的优先，规则见 [docs/catalog.md](docs/catalog.md)）：`-list-models`、`/model` 菜单、`-thinking`、`get_available_models`、`cycle_model` 与 `set_thinking_level` 读的是同一个 `FactsOf`。配置本身仍是扁平的：没有整份 models.dev 的生成器，"可用模型表"就是配置里声明的那几个（组合根把它填进 `app.Config.Models`），也没有"临时发现一个本机模型"的路。
 - 系统提示词的内置部分 `go:embed` 进二进制（`cmd/atlas/system.md`），是精简版：skill 名单与上下文文件由 `promptBuilder` 拼在它后面，不写在这个文件里；模板与按 provider 分段的段落仍然没有。`-system-prompt-file` 整个换掉的是内置部分，skill 名单照旧追加。
 - 打开 `-session` 时保持文件里记录的 cwd，不 chdir：工具仍在当前目录执行，而 pi 会把工作目录切到会话记录的那个。
 - 凭据在组合根挂到适配器上（`provider.WithAPIKey`），既不进内核也不进会话文件；pi 由 provider 自己读环境变量或 oauth token。

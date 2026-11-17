@@ -17,6 +17,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"pi-go/internal/app"
+	"pi-go/internal/assembly"
 	"pi-go/internal/config"
 	"pi-go/internal/theme"
 	"pi-go/internal/tui"
@@ -24,7 +25,7 @@ import (
 )
 
 // runTUI runs the session on the alternate screen until the reader leaves.
-func runTUI(ctx context.Context, application *app.App, side *sideState, servers mcpState, models models, resume *sessionPicker, prompts *promptSource, bar *statusBar, cfg *config.Config, cwd string, stdio streams) error {
+func runTUI(ctx context.Context, application *app.App, side *sideState, servers mcpState, models models, resume *sessionPicker, prompts *assembly.PromptSource, bar *statusBar, cfg *config.Config, cwd string, stdio streams) error {
 	styles, err := tuiStyles(cfg, cwd, stdio)
 	if err != nil {
 		return err
@@ -212,14 +213,19 @@ func welcomeNote(application *app.App, bar *statusBar) string {
 
 // runTUILine handles one submitted line: a slash command, a side turn, or a main
 // turn. The order matters and is the same one the REPL uses.
-func runTUILine(ctx context.Context, application *app.App, side *sideState, servers mcpState, models models, resume *sessionPicker, prompts *promptSource, pick chooser, line string, sink tui.Sink) error {
-	if side != nil && application != nil {
-		// The gate is rebuilt per turn because it closes over the turn's sink;
-		// what it remembers is keyed by the session open right now, so a session
-		// switch starts from no standing answers. Installing it before commands
-		// and main turns lets both the main permission ladder and the side
-		// conversation ask through the same modal.
-		side.approve = approveTool(side, application.Session().ID(), sink.Ask, sink.Note)
+func runTUILine(ctx context.Context, application *app.App, side *sideState, servers mcpState, models models, resume *sessionPicker, prompts *assembly.PromptSource, pick chooser, line string, sink tui.Sink) error {
+	if side != nil && side.gate != nil && application != nil {
+		// The question is rebuilt per turn because it closes over the turn's
+		// sink; what a "yes, and stop asking" answer remembers is keyed by the
+		// session open right now, so a session switch starts from no standing
+		// answers. Installing it before commands and main turns lets both the
+		// main permission ladder and the side conversation ask through the same
+		// modal.
+		side.gate.SetSession(func() string { return application.Session().ID() })
+		side.setAsk(func(request assembly.Ask) assembly.Answer {
+			reply := sink.Ask(tui.AskRequest{Subject: request.Subject, Tool: request.Tool})
+			return assembly.Answer{Allowed: reply.Allowed, Always: reply.Always}
+		}, sink.Note)
 	}
 	trimmed := strings.TrimSpace(line)
 	if strings.HasPrefix(trimmed, "/") {
@@ -236,7 +242,7 @@ func runTUILine(ctx context.Context, application *app.App, side *sideState, serv
 // The command table is the one the inline interface uses, unchanged: it writes
 // to an io.Writer and reads session state, which is exactly the contract a notice
 // writer can satisfy.
-func runTUICommand(ctx context.Context, application *app.App, side *sideState, servers mcpState, models models, resume *sessionPicker, prompts *promptSource, pick chooser, line string, sink tui.Sink) error {
+func runTUICommand(ctx context.Context, application *app.App, side *sideState, servers mcpState, models models, resume *sessionPicker, prompts *assembly.PromptSource, pick chooser, line string, sink tui.Sink) error {
 	// Each line goes to whichever conversation is the prompt's home when it is
 	// written, and the switch is announced first. /side asks its question before
 	// the command returns, so a stream that were pinned to the old view would put

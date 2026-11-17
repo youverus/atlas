@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"pi-go/internal/app"
+	"pi-go/internal/assembly"
 	"pi-go/internal/provider/faux"
 	"pi-go/internal/session"
 	"pi-go/internal/tool/fs"
@@ -22,19 +23,19 @@ import (
 // need the same tools the user's turn would have.
 func commandApp(t *testing.T, manager *session.Manager, cwd string, responses ...faux.Response) *app.App {
 	t.Helper()
-	return commandAppWith(t, manager, cwd, promptBuilder{noSkills: true}.source(), responses...)
+	return commandAppWith(t, manager, cwd, assembly.NewPrompts("", false, true).Source(), responses...)
 }
 
 // commandAppWith is commandApp for a session whose prompt comes from a source.
 // The app and the commands have to share that source: the app asks it again
 // for every turn, and a command that reports what the prompt holds has to
 // report the same one.
-func commandAppWith(t *testing.T, manager *session.Manager, cwd string, prompts *promptSource, responses ...faux.Response) *app.App {
+func commandAppWith(t *testing.T, manager *session.Manager, cwd string, prompts *assembly.PromptSource, responses ...faux.Response) *app.App {
 	t.Helper()
 	application, err := app.New(app.Config{
 		Model:        wire.Model{ID: "faux-1", Name: "Faux", API: "faux", Provider: "faux"},
 		Provider:     faux.New(responses...),
-		SystemPrompt: prompts.prompt,
+		SystemPrompt: prompts.Prompt,
 		Tools:        app.StaticTools(fs.Tools(fs.Options{Cwd: cwd})),
 	}, manager)
 	if err != nil {
@@ -57,13 +58,13 @@ func memoryAt(t *testing.T, dir string) *session.Manager {
 // runCommand dispatches one slash command and returns its output.
 func runCommand(t *testing.T, application *app.App, line string) (string, error) {
 	t.Helper()
-	return runCommandWith(t, application, promptBuilder{noSkills: true}.source(), line)
+	return runCommandWith(t, application, assembly.NewPrompts("", false, true).Source(), line)
 }
 
 // runCommandWith is runCommand for the commands that ask about the prompt:
 // /init and /reload take the same source the session was started with, and the
 // answer depends on it.
-func runCommandWith(t *testing.T, application *app.App, prompts *promptSource, line string) (string, error) {
+func runCommandWith(t *testing.T, application *app.App, prompts *assembly.PromptSource, line string) (string, error) {
 	t.Helper()
 	out := &bytes.Buffer{}
 	render := newRenderer(out, out, false)
@@ -556,7 +557,7 @@ func TestInitWritesAgentsFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("encode tool arguments: %v", err)
 	}
-	prompts := promptBuilder{noSkills: true}.source()
+	prompts := assembly.NewPrompts("", false, true).Source()
 	application := commandAppWith(t, memoryAt(t, cwd), cwd, prompts,
 		faux.Response{ToolCalls: []wire.Content{wire.ToolCallContent("call_1", "write", args)}},
 		faux.Response{Text: "wrote AGENTS.md"},
@@ -598,7 +599,7 @@ func TestInitWithNoContextFilesSaysTheFileIsNotRead(t *testing.T) {
 	if err != nil {
 		t.Fatalf("encode tool arguments: %v", err)
 	}
-	prompts := promptBuilder{noContext: true, noSkills: true}.source()
+	prompts := assembly.NewPrompts("", true, true).Source()
 	application := commandAppWith(t, memoryAt(t, cwd), cwd, prompts,
 		faux.Response{ToolCalls: []wire.Content{wire.ToolCallContent("call_1", "write", args)}},
 		faux.Response{Text: "wrote AGENTS.md"},

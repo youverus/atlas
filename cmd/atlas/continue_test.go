@@ -15,6 +15,7 @@ import (
 	"testing"
 
 	"pi-go/internal/app"
+	"pi-go/internal/assembly"
 	"pi-go/internal/provider"
 	"pi-go/internal/provider/faux"
 	"pi-go/internal/wire"
@@ -95,7 +96,7 @@ func interruptedApp(t *testing.T, cwd string, prov provider.Provider, said strin
 	application, err := app.New(app.Config{
 		Model:        wire.Model{ID: "faux-1", Name: "Faux", API: "faux", Provider: "faux"},
 		Provider:     prov,
-		SystemPrompt: promptBuilder{noSkills: true}.source().prompt,
+		SystemPrompt: assembly.NewPrompts("", false, true).Source().Prompt,
 	}, memoryAt(t, cwd))
 	if err != nil {
 		t.Fatalf("app.New: %v", err)
@@ -258,7 +259,7 @@ func TestContinueRefusesAnArchivedSession(t *testing.T) {
 	application, err := app.New(app.Config{
 		Model:        wire.Model{ID: "faux-1", Name: "Faux", API: "faux", Provider: "faux"},
 		Provider:     prov,
-		SystemPrompt: promptBuilder{noSkills: true}.source().prompt,
+		SystemPrompt: assembly.NewPrompts("", false, true).Source().Prompt,
 	}, manager)
 	if err != nil {
 		t.Fatalf("app.New: %v", err)

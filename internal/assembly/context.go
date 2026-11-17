@@ -1,4 +1,4 @@
-package main
+package assembly
 
 // The project's context files: the AGENTS.md a repository keeps at its root,
 // read once at startup and appended to the system prompt.
@@ -35,7 +35,7 @@ type contextFile struct {
 	content string
 }
 
-// projectContext renders the context files that apply to cwd as one block and
+// ProjectContext renders the context files that apply to cwd as one block and
 // returns the paths it read, or "" when the project has none.
 //
 // The paths come back with the text because they are the proof that a file
@@ -46,7 +46,7 @@ type contextFile struct {
 // file: without it the model sees a pile of project rules in the same breath as
 // its own instructions, and cannot tell which of the two it is allowed to
 // question.
-func projectContext(cwd string) (string, []string, error) {
+func ProjectContext(cwd string) (string, []string, error) {
 	files, err := contextFiles(cwd)
 	if err != nil {
 		return "", nil, err

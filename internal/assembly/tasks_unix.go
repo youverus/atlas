@@ -1,6 +1,6 @@
 //go:build unix
 
-package main
+package assembly
 
 import (
 	"os"
@@ -16,13 +16,13 @@ import (
 // keeps files, and the package has no opinion about that.
 const taskLogSuffix = ".log"
 
-// tasksFor builds the record service and the tools that read it.
+// TasksFor builds the record service and the tools that read it.
 //
 // Both come back together because they are the same capability seen twice: the
 // service is where bash reports a detached command, and the tools are how a later
 // call finds it. A platform that can run neither returns both as nil, which is
 // what removes the argument and the tools from the model's view.
-func tasksFor(manager *session.Manager, spill *tool.Spill) taskWiring {
+func TasksFor(manager *session.Manager, spill *tool.Spill) TaskWiring {
 	service := task.New(task.Options{
 		// Asked per task rather than captured: /resume changes the id, and a
 		// task recorded under the previous conversation would be invisible to
@@ -35,5 +35,5 @@ func tasksFor(manager *session.Manager, spill *tool.Spill) taskWiring {
 			return spill.Create(prefix, taskLogSuffix)
 		},
 	})
-	return taskWiring{service: service, tools: tasks.Tools(service)}
+	return TaskWiring{Service: service, Tools: tasks.Tools(service)}
 }

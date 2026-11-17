@@ -1,9 +1,10 @@
 // Command atlas is the CLI: one static binary that drives the kernel against
 // the models declared in ~/.atlas/config.json.
 //
-// It is the composition root, and the only package that knows a concrete wire
+// It is a front end, not the composition root: assembling a Turn lives in
+// pi-go/internal/assembly, which is the only package that knows a concrete wire
 // adapter. Everything below it takes a provider.Provider, which is what makes
-// "choose openai-completions or anthropic-messages" one switch here instead of
+// "choose openai-completions or anthropic-messages" one switch there instead of
 // a conditional in the kernel: tests/app and tests/rpc fail the build if the
 // orchestration or the transport ever reaches for an adapter directly.
 //
@@ -20,29 +21,25 @@ import (
 	"io"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"strings"
 	"syscall"
 
 	"pi-go/internal/app"
+	"pi-go/internal/assembly"
 	"pi-go/internal/config"
 	"pi-go/internal/permission"
 	"pi-go/internal/provider/faux"
 	"pi-go/internal/rpc"
 	"pi-go/internal/session"
-	"pi-go/internal/task"
 	"pi-go/internal/tool"
 	"pi-go/internal/tool/echo"
-	"pi-go/internal/tool/fs"
-	"pi-go/internal/tool/git"
-	"pi-go/internal/tool/shell"
 	"pi-go/internal/tui"
 	"pi-go/internal/wire"
 )
 
 // version is the CLI's own version. The window title quotes it, so it lives on
 // its own rather than inside the code that draws it.
-const version = "0.12.27"
+const version = "0.12.28"
 
 // spillDirName is the subdirectory of a session bucket where output too large
 // for a message is written. It sits beside the .jsonl files rather than in one
@@ -114,6 +111,27 @@ type options struct {
 	// from a script, where the answer is an error rather than a screen the
 	// caller cannot render.
 	tui bool
+}
+
+// assembly is the same command line seen as the request the kernel takes. Every
+// field is a flag read straight through; the session is the one exception,
+// because a -resume prefix needs the session list to search and that search
+// stays in this package.
+func (o options) assembly() assembly.Options {
+	return assembly.Options{
+		ConfigPath:     o.configPath,
+		Model:          o.model,
+		Thinking:       o.thinking,
+		Workdir:        o.workdir,
+		PermissionMode: o.permissionMode,
+		SystemFile:     o.systemFile,
+		NoContextFiles: o.noContextFiles,
+		NoSkills:       o.noSkills,
+		SessionPath:    o.sessionPath,
+		ContinueLast:   o.continueLast,
+		SessionDir:     o.sessionDir,
+		Version:        version,
+	}
 }
 
 // streams is the process surface: the three file handles and whether the
@@ -222,7 +240,7 @@ func parseFlags(args []string) (options, error) {
 }
 
 func run(ctx context.Context, opts options, stdio streams) error {
-	cwd, err := resolveDir(opts.workdir)
+	cwd, err := assembly.ResolveDir(opts.workdir)
 	if err != nil {
 		return err
 	}
@@ -230,7 +248,7 @@ func run(ctx context.Context, opts options, stdio streams) error {
 		return runDemo(ctx, opts, cwd, stdio)
 	}
 
-	cfg, err := loadConfig(opts.configPath)
+	cfg, err := assembly.LoadConfig(opts.configPath)
 	if err != nil {
 		return err
 	}
@@ -246,158 +264,45 @@ func run(ctx context.Context, opts options, stdio streams) error {
 	return runConfigured(ctx, opts, cwd, cfg, stdio)
 }
 
-// loadConfig reads the config file. On a first run it creates the home
-// directory and a template, then fails with what to edit: continuing with a
-// guessed model would send the first prompt to an endpoint the user never chose.
-//
-// An explicit -config never writes. A typed path is the user's, and a typo must
-// not leave a template behind to be mistaken for their own file.
-func loadConfig(explicit string) (*config.Config, error) {
-	if explicit != "" {
-		path, err := config.ExpandHome(explicit)
-		if err != nil {
-			return nil, err
-		}
-		return config.Load(path)
-	}
-
-	path, err := config.DefaultPath()
-	if err != nil {
-		return nil, err
-	}
-	cfg, err := config.Load(path)
-	if err == nil {
-		return cfg, nil
-	}
-	if !errors.Is(err, os.ErrNotExist) {
-		return nil, err
-	}
-	written, created, writeErr := config.WriteTemplate(filepath.Dir(path))
-	if writeErr != nil {
-		return nil, writeErr
-	}
-	if !created {
-		return nil, fmt.Errorf("config: %s was not readable and could not be created", path)
-	}
-	return nil, fmt.Errorf("config: created %s; add a credential there, then run atlas again", written)
-}
-
 // runConfigured is the mode that talks to a real endpoint.
 func runConfigured(ctx context.Context, opts options, cwd string, cfg *config.Config, stdio streams) error {
-	selection, err := cfg.Resolve(opts.model)
-	if err != nil {
-		return err
-	}
-	level := thinkingLevel(opts, cfg)
-	level, adjustment, err := fitThinking(selection, level)
-	if err != nil {
-		return err
-	}
-	if adjustment != "" {
-		fmt.Fprintln(stdio.err, "warning:", adjustment)
-	}
-	model, adapter, err := build(selection)
-	if err != nil {
-		return err
-	}
-	if notice := credentialNotice(selection); notice != "" {
-		fmt.Fprintln(stdio.err, "warning:", notice)
+	request := opts.assembly()
+	// A -resume prefix is resolved here rather than in the assembly: the search
+	// reads the session list and can print the candidates it refused, and a
+	// window has no menu to read them on.
+	if opts.resumePath != "" {
+		dir, err := assembly.SessionDir(request, cfg, cwd)
+		if err != nil {
+			return err
+		}
+		target, err := resolveResumeTarget(opts.resumePath, dir, cwd)
+		if err != nil {
+			return err
+		}
+		request.SessionPath = target
 	}
 
-	dir, err := sessionDir(opts, cfg, cwd)
+	kernel, notes, err := assembly.New(ctx, request)
 	if err != nil {
 		return err
 	}
-	manager, note, err := openSession(opts, dir, cwd, false)
-	if err != nil {
-		return err
-	}
-	if note != "" {
-		fmt.Fprintln(stdio.err, "note:", note)
-	}
-	reportSession(manager, stdio)
-	// Output too large for a message is written next to the session that asked
-	// for it, so deleting a conversation takes its leftovers with it and the
-	// path in the notice says which conversation it came from. The directory is
-	// asked for at write time rather than read here, because /resume can move
-	// the session while the tool set stays the one built for this workspace.
-	spill := tool.NewSpill(func() string { return filepath.Join(manager.Dir(), spillDirName) })
+	// The connections outlive the turn and die with the process: a stdio server
+	// is a child process, and one that is not shut down keeps its pipes and its
+	// temp directory.
+	defer kernel.Close()
 
-	// The prompt is a source, not a string: the app asks it again for every
-	// turn, so a project file that changed and a skill that was installed
-	// take effect on the next question. The first read happens here so a file
-	// that cannot be read stops the session before it starts.
-	prompts := opts.prompts()
-	source := prompts.source()
-	if _, err := source.read(cwd); err != nil {
-		return err
-	}
-	for _, note := range source.last().Notes {
+	for _, note := range notes {
 		fmt.Fprintln(stdio.err, "warning:", note)
 	}
-
-	// The git tools are per directory like the file tools: the repository they
-	// read is the one the session is in, and /resume can move that. Building them
-	// here is also what decides once whether this machine has git at all — a
-	// machine without it registers none of them.
-	gitTools := func(cwd string) []tool.Tool { return git.Tools(git.Options{Cwd: cwd}) }
-
-	webSet, webNote := webTools(cfg.Web, spill)
-	if webNote != "" {
-		fmt.Fprintln(stdio.err, "warning:", webNote)
-	}
-	applied, sandboxNote := sandboxNote(cfg.Sandbox)
-	if sandboxNote != "" {
-		fmt.Fprintln(stdio.err, "warning:", sandboxNote)
-	}
-	permEngine, permNote := permissionFor(cfg, applied, selection, opts.permissionMode)
-	if permNote != "" {
-		fmt.Fprintln(stdio.err, "warning:", permNote)
-	}
-	mcpServers, mcpNotes, err := mcpFor(ctx, cwd, spill)
-	if err != nil {
-		return err
-	}
-	// The connections outlive the turn and die with the process, so the defer is
-	// the whole lifetime rule: a stdio server is a child process, and one that is
-	// not shut down keeps its pipes and its temp directory.
-	defer mcpServers.close()
-	for _, note := range mcpNotes {
-		fmt.Fprintln(stdio.err, "warning:", note)
-	}
-	// The set is a function of the directory, not the list built for this one:
-	// /resume can open a conversation recorded in another project, and the file
-	// tools that come with it are bounded by that project's workspace.
-	wiring := tasksFor(manager, spill)
-	if wiring.service != nil {
-		// Leaving a background command behind would be a process nobody can
-		// list and nobody can stop, so the end of this process is the end of
-		// its tasks. The defer sits here because serve owns the whole session.
-		defer func() { _ = wiring.service.Close() }()
-	}
-	set := toolSet(cfg, webSet, mcpServers.tools, gitTools, spill, wiring)
-	// The gate is built before the app because the app keeps the hook for its
-	// lifetime.
-	side := newSideStateWith(permEngine)
-	application, err := app.New(app.Config{
-		Model:          model,
-		Provider:       adapter,
-		ThinkingLevel:  level,
-		SystemPrompt:   source.prompt,
-		Tools:          set,
-		Resolver:       resolverFor(cfg),
-		Models:         modelTable(cfg),
-		FitThinking:    thinkingFitter(cfg),
-		BeforeToolCall: side.beforeToolCall,
-		GoalBudget:     goalBudget(cfg),
-	}, manager)
-	if err != nil {
-		return err
-	}
-	if note := application.RestoreNote(); note != "" {
+	for _, note := range kernel.Notices() {
 		fmt.Fprintln(stdio.err, "note:", note)
 	}
-	return serve(ctx, application, side, mcpServers, opts, cfg, cwd, toolSummary(set(cwd)), source, stdio)
+	reportSession(kernel.Manager, stdio)
+
+	// The terminal is what knows whether the next turn is typed into the main
+	// conversation or into a side one, so it owns that half of the gate.
+	side := newSideStateWith(kernel.Gate)
+	return serve(ctx, kernel, side, opts, stdio)
 }
 
 // runDemo keeps the offline path: a scripted provider, the echo tool, and an
@@ -411,11 +316,19 @@ func runDemo(ctx context.Context, opts options, cwd string, stdio streams) error
 
 	// The demo has no config, so the session directory comes from the flags or
 	// the default.
-	dir, err := sessionDir(opts, nil, cwd)
+	request := opts.assembly()
+	dir, err := assembly.SessionDir(request, nil, cwd)
 	if err != nil {
 		return err
 	}
-	manager, note, err := openSession(opts, dir, cwd, true)
+	if opts.resumePath != "" {
+		target, resolveErr := resolveResumeTarget(opts.resumePath, dir, cwd)
+		if resolveErr != nil {
+			return resolveErr
+		}
+		request.SessionPath = target
+	}
+	manager, note, err := assembly.OpenSession(request, dir, cwd, true)
 	if err != nil {
 		return err
 	}
@@ -450,7 +363,15 @@ func runDemo(ctx context.Context, opts options, cwd string, stdio streams) error
 // full-screen session; a pipe gets one prompt and a transcript. grants names the
 // tool groups the session holds, which the footer shows as the session's
 // permissions.
-func serve(ctx context.Context, application *app.App, side *sideState, servers mcpState, opts options, cfg *config.Config, cwd, grants string, prompts *promptSource, stdio streams) error {
+func serve(ctx context.Context, kernel *assembly.Kernel, side *sideState, opts options, stdio streams) error {
+	// The kernel carries what this function would otherwise take as six
+	// arguments: the app, the file it was built from, the directory it runs in,
+	// the live prompt and the connections.
+	application, cfg, cwd := kernel.App, kernel.Config, kernel.Cwd
+	servers, prompts := kernel.MCPServers(), kernel.Prompts
+	// grants names the tool groups the session holds, which the footer shows as
+	// the session's permissions.
+	grants := toolSummary(kernel.Tools(cwd))
 	if opts.rpcMode {
 		return rpc.New(application).Serve(ctx, stdio.in, stdio.out)
 	}
@@ -511,7 +432,7 @@ func serve(ctx context.Context, application *app.App, side *sideState, servers m
 	// The session reads the terminal itself, from here on. Building anything
 	// else that reads it first would leave two readers taking each other's
 	// keystrokes.
-	return runTUI(ctx, application, side, servers, modelSet,
+	return runTUI(ctx, application, side, mcpState{servers}, modelSet,
 		newSessionPicker(application, allHome(opts, cfg)), prompts,
 		newStatusBar(application, side, cwd, grants), cfg, cwd, stdio)
 }
@@ -579,38 +500,6 @@ func runTurn(ctx context.Context, render *renderer, run func(context.Context, fu
 	return errors.New("the turn failed without a reason")
 }
 
-// openSession opens the session the flags select, or starts one. keepMemory
-// makes a fresh session in-memory, which is what a demo run needs so a smoke
-// test leaves no files behind. The note reports an adjustment the caller should
-// hand to the user, such as a recorded directory that had to be replaced.
-func openSession(opts options, dir, cwd string, keepMemory bool) (*session.Manager, string, error) {
-	switch {
-	case opts.sessionPath != "":
-		path, err := resolveDir(opts.sessionPath)
-		if err != nil {
-			return nil, "", err
-		}
-		return openRecorded(path, dir, cwd, opts.workdir != "")
-	case opts.resumePath != "":
-		path, err := resolveResumeTarget(opts.resumePath, dir, cwd)
-		if err != nil {
-			return nil, "", err
-		}
-		return openRecorded(path, dir, cwd, opts.workdir != "")
-	case opts.continueLast:
-		manager, err := session.ContinueRecent(cwd, dir)
-		return manager, "", err
-	}
-	// A session flag asks for a file, and then the demo must write one: without
-	// a flag the demo stays in memory so a smoke test leaves nothing behind.
-	if keepMemory && opts.sessionDir == "" {
-		manager, err := session.InMemory(cwd, session.Options{})
-		return manager, "", err
-	}
-	manager, err := session.Create(cwd, dir, session.Options{})
-	return manager, "", err
-}
-
 // reportSession says where the session file is, and whether it opened read-only.
 // An archived file is a legitimate thing to open by path, and the lock is not
 // something the first prompt should be the first to discover.
@@ -621,129 +510,6 @@ func reportSession(manager *session.Manager, stdio streams) {
 	if session.Archived(manager.File()) {
 		fmt.Fprintln(stdio.err, archivedLocked)
 	}
-}
-
-// openRecorded opens a session file named by -session or -resume. The cwd
-// override stays empty unless the recorded directory is gone: an opened session
-// keeps the directory it was recorded in, and rewriting it would make the header
-// disagree with the messages.
-//
-// A deleted directory is a startup failure, not a surprise inside the first
-// tool call. -cwd is the explicit way to say "run it here instead"; without it
-// the run stops while no tool has touched anything yet.
-func openRecorded(path, dir, cwd string, override bool) (*session.Manager, string, error) {
-	manager, err := session.Open(path, dir, "")
-	if err != nil {
-		return nil, "", err
-	}
-	missing, gone := manager.MissingCwd()
-	if !gone {
-		return manager, "", nil
-	}
-	if !override {
-		return nil, "", fmt.Errorf("session %s was recorded in %s, which no longer exists; cd %s to run it there, or pass -cwd %s to run it in the current directory %s", path, missing, missing, cwd, cwd)
-	}
-	reopened, err := session.Open(path, dir, cwd)
-	if err != nil {
-		return nil, "", err
-	}
-	note := fmt.Sprintf("session %s was recorded in %s, which no longer exists; running it in %s (-cwd)", path, missing, cwd)
-	return reopened, note, nil
-}
-
-// sessionDir resolves where sessions live: the flag, then the config, then the
-// pi-style default under the atlas home, which is
-// <home>/sessions/<encoded cwd>.
-func sessionDir(opts options, cfg *config.Config, cwd string) (string, error) {
-	raw := opts.sessionDir
-	if raw == "" && cfg != nil {
-		raw = cfg.SessionDir
-	}
-	if raw == "" {
-		home, err := config.DefaultHome()
-		if err != nil {
-			return "", err
-		}
-		return session.DefaultDir(cwd, home), nil
-	}
-	return resolveDir(raw)
-}
-
-func thinkingLevel(opts options, cfg *config.Config) string {
-	if opts.thinking != "" {
-		return opts.thinking
-	}
-	return cfg.ThinkingLevel
-}
-
-// taskWiring is the background-command capability, or nothing.
-//
-// It is a struct rather than two parameters because the two halves are never
-// supplied apart: a service with no tools records commands nothing can list, and
-// tools with no service list an empty file forever. Both are nil on a platform
-// without a detached runner, which is the signal the set builder reads.
-type taskWiring struct {
-	service *task.Service
-	tools   []tool.Tool
-}
-
-// toolSet is the built-in set as the app asks for it: the file tools, bash,
-// whatever the web block contributed, and the MCP servers this process
-// connected, for one directory.
-//
-// The file and shell tools are always present, and what narrows them is not the
-// list but the arguments: the file tools are bounded by the workspace they were
-// given, and bash is bounded by the sandbox when the config asks for one. The web
-// tools join the list as they are — they were built once, from the config, and do
-// not belong to a directory.
-//
-// The task service is the one place where a capability is conditional. It is nil
-// on a platform with no detached runner, and nil is what removes
-// run_in_background from the bash schema and task_query from the tool list: an
-// argument that can only fail is worse than an argument that is not offered.
-//
-// The MCP tools are the one part that is asked for rather than captured: a server
-// can declare a tool while the session runs, so mcpTools is a function the app
-// calls again before every turn (docs/mcp.md section 5).
-//
-// It is a function of cwd rather than a slice because a session records the
-// directory its tools ran in, and /resume can open one from another project.
-// The sandbox is rebuilt with it: a confinement whose writable directory was
-// the one this process started in would refuse every write in the project the
-// session actually belongs to.
-func toolSet(cfg *config.Config, webSet []tool.Tool, mcpTools func() []tool.Tool, gitTools func(cwd string) []tool.Tool, spill *tool.Spill, wiring taskWiring) app.ToolSet {
-	var block *config.Sandbox
-	if cfg != nil {
-		block = cfg.Sandbox
-	}
-	return func(cwd string) []tool.Tool {
-		set := fs.Tools(fs.Options{Cwd: cwd})
-		options := shell.Options{Cwd: cwd, Sandbox: narrow(confine(block, cwd)), Spill: spill}
-		if wiring.service != nil {
-			options.Background = wiring.service
-		}
-		set = append(set, shell.Tools(options)...)
-		set = append(set, gitTools(cwd)...)
-		set = append(set, wiring.tools...)
-		set = append(set, webSet...)
-		if mcpTools == nil {
-			return set
-		}
-		return append(set, mcpTools()...)
-	}
-}
-
-// resolveDir expands "~" and makes a path absolute. An empty path means the
-// process working directory.
-func resolveDir(path string) (string, error) {
-	expanded, err := config.ExpandHome(path)
-	if err != nil {
-		return "", err
-	}
-	if expanded == "" {
-		return os.Getwd()
-	}
-	return filepath.Abs(expanded)
 }
 
 // supportsColor reports whether the terminal takes ANSI styling. NO_COLOR and

@@ -4,6 +4,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"pi-go/internal/assembly"
 	"pi-go/internal/config"
 	"pi-go/internal/tool"
 )
@@ -19,7 +20,7 @@ func TestTheGitFamilyIsBuiltForTheDirectory(t *testing.T) {
 		asked = append(asked, cwd)
 		return []tool.Tool{namedTool{"git_status"}}
 	}
-	set := toolSet(&config.Config{}, nil, nil, family, nil, taskWiring{})
+	set := assembly.ToolSet(&config.Config{}, nil, nil, family, nil, assembly.TaskWiring{})
 
 	dir := filepath.Join(t.TempDir(), "project")
 	tools := set(dir)

@@ -11,6 +11,7 @@ import (
 	"charm.land/lipgloss/v2"
 
 	"pi-go/internal/app"
+	"pi-go/internal/assembly"
 	"pi-go/internal/tui"
 	"pi-go/internal/wire"
 )
@@ -49,7 +50,7 @@ type turnRunner func(ctx context.Context, run func(context.Context, func(wire.Ag
 // replCommand handles one slash command and reports whether the session should
 // end. An unknown command is an error, not a prompt: sending "/modle" to the
 // model would waste a turn and confuse the transcript.
-func replCommand(ctx context.Context, application *app.App, side *sideState, line string, model models, resume *sessionPicker, pick chooser, prompts *promptSource, out io.Writer, render *renderer, servers mcpState, draft func(string), turn turnRunner) (bool, error) {
+func replCommand(ctx context.Context, application *app.App, side *sideState, line string, model models, resume *sessionPicker, pick chooser, prompts *assembly.PromptSource, out io.Writer, render *renderer, servers mcpState, draft func(string), turn turnRunner) (bool, error) {
 	fields := strings.Fields(line)
 	// /skill:foo is the spelling people bring from other agents, and "unknown
 	// command" would read as "atlas has no skills". The hint comes before the

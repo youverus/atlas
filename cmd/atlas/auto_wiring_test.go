@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"pi-go/internal/assembly"
 	"pi-go/internal/classify"
 	"pi-go/internal/permission"
 	"pi-go/internal/provider/faux"
@@ -27,7 +28,7 @@ func autoState(t *testing.T, answer faux.Response) (*sideState, *faux.Provider) 
 			Model:    wire.Model{ID: "judge", MaxTokens: 4096},
 		},
 	})
-	return newSideStateWith(engine), script
+	return newSideStateWith(assembly.NewGate(engine)), script
 }
 
 // TestAutoRunsTheAskTheClassifierAllows is the mode end to end: a write in the

@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"pi-go/internal/assembly"
 	"pi-go/internal/config"
 	"pi-go/internal/permission"
 	"pi-go/internal/provider/faux"
@@ -23,7 +24,7 @@ import (
 func TestBashRunsConfinedEndToEnd(t *testing.T) {
 	dir := t.TempDir()
 	block := &config.Sandbox{}
-	if applied, note := sandboxNote(block); !applied {
+	if applied, note := assembly.SandboxNote(block); !applied {
 		t.Skipf("no sandbox on this machine: %s", note)
 	}
 
@@ -74,11 +75,11 @@ func TestAskStopsTheCall(t *testing.T) {
 	}
 
 	dir := t.TempDir()
-	engine, note := permissionFor(&config.Config{}, false, config.Selection{}, "")
+	engine, note := assembly.PermissionFor(&config.Config{}, false, config.Selection{}, "")
 	if note != "" {
-		t.Fatalf("permissionFor note = %q, want empty", note)
+		t.Fatalf("assembly.PermissionFor note = %q, want empty", note)
 	}
-	state := newSideStateWith(engine)
+	state := newSideStateWith(assembly.NewGate(engine))
 	asked := 0
 	state.approve = func(tool.Call) bool {
 		asked++
@@ -109,30 +110,4 @@ func TestAskStopsTheCall(t *testing.T) {
 	if !strings.Contains(reason, "declined") || !strings.Contains(reason, "do not retry") {
 		t.Fatalf("model received %q, want an actionable refusal", reason)
 	}
-}
-
-// TestSandboxForIncludesDefaultAndConfiguredDenyRead verifies that sandboxFor
-// wires both the default credential directories and the user's extra denyRead
-// entries into the sandbox policy.
-func TestSandboxForIncludesDefaultAndConfiguredDenyRead(t *testing.T) {
-	extra := t.TempDir()
-	list := denyReadFor(&config.Sandbox{DenyRead: []string{extra}})
-	if !containsString(list, extra) {
-		t.Fatalf("denyReadFor = %v, missing configured path %q", list, extra)
-	}
-	if home, err := os.UserHomeDir(); err == nil && home != "" {
-		wantSSH := filepath.Join(home, ".ssh")
-		if !containsString(list, wantSSH) {
-			t.Fatalf("denyReadFor = %v, missing default %q", list, wantSSH)
-		}
-	}
-}
-
-func containsString(list []string, want string) bool {
-	for _, item := range list {
-		if item == want {
-			return true
-		}
-	}
-	return false
 }

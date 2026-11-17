@@ -1,4 +1,4 @@
-package main
+package assembly
 
 import (
 	"os"
@@ -47,9 +47,9 @@ func TestTheContextFilesRunFromTheRootDownToTheWork(t *testing.T) {
 	putFile(t, filepath.Join(root, "pkg", "CLAUDE.md"), "# package rules\n")
 	putFile(t, filepath.Join(root, "pkg", "deep", "AGENTS.md"), "# deep rules\n")
 
-	context, paths, err := projectContext(filepath.Join(root, "pkg", "deep"))
+	context, paths, err := ProjectContext(filepath.Join(root, "pkg", "deep"))
 	if err != nil {
-		t.Fatalf("projectContext: %v", err)
+		t.Fatalf("ProjectContext: %v", err)
 	}
 	if !strings.HasPrefix(context, "Project-specific instructions and guidelines:") {
 		t.Fatalf("context = %q, want the heading first", context)
@@ -177,7 +177,7 @@ func TestAContextFileThatCannotBeReadIsAnError(t *testing.T) {
 	}
 	t.Cleanup(func() { os.Chmod(path, 0o644) })
 
-	if _, _, err := projectContext(dir); err == nil {
+	if _, _, err := ProjectContext(dir); err == nil {
 		t.Fatal("want an error for a file that cannot be read")
 	}
 }
@@ -193,9 +193,9 @@ func TestTheGlobalFileComesBeforeTheProjectOne(t *testing.T) {
 	project := t.TempDir()
 	putFile(t, filepath.Join(project, "AGENTS.md"), "# project rules\n")
 
-	context, paths, err := projectContext(project)
+	context, paths, err := ProjectContext(project)
 	if err != nil {
-		t.Fatalf("projectContext: %v", err)
+		t.Fatalf("ProjectContext: %v", err)
 	}
 	machine, projectAt := strings.Index(context, "# machine rules"), strings.Index(context, "# project rules")
 	if machine < 0 || projectAt < 0 {
@@ -213,7 +213,7 @@ func TestTheGlobalFileComesBeforeTheProjectOne(t *testing.T) {
 // keeps every offline mode and every existing test saying what it said before.
 func TestAProjectWithoutContextFilesGetsThePlainPrompt(t *testing.T) {
 	emptyHome(t)
-	build, err := promptBuilder{}.build(t.TempDir())
+	build, err := Prompts{}.Build(t.TempDir())
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}
@@ -230,7 +230,7 @@ func TestTheContextFollowsTheBasePrompt(t *testing.T) {
 	dir := t.TempDir()
 	putFile(t, filepath.Join(dir, "AGENTS.md"), "# project rules\n")
 
-	build, err := promptBuilder{}.build(dir)
+	build, err := Prompts{}.Build(dir)
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}
@@ -253,7 +253,7 @@ func TestACustomPromptStillGetsTheContext(t *testing.T) {
 	putFile(t, base, "my own prompt\n")
 	putFile(t, filepath.Join(dir, "AGENTS.md"), "# project rules\n")
 
-	build, err := promptBuilder{file: base}.build(dir)
+	build, err := Prompts{file: base}.Build(dir)
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}
@@ -269,7 +269,7 @@ func TestNoContextFilesLeavesThePromptAlone(t *testing.T) {
 	dir := t.TempDir()
 	putFile(t, filepath.Join(dir, "AGENTS.md"), "# project rules\n")
 
-	build, err := promptBuilder{noContext: true}.build(dir)
+	build, err := Prompts{noContext: true}.Build(dir)
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}

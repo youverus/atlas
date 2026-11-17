@@ -12,6 +12,7 @@ import (
 	"io"
 
 	"pi-go/internal/app"
+	"pi-go/internal/assembly"
 )
 
 // reloadPrompt reads the instructions again and reports what it found.
@@ -24,7 +25,7 @@ import (
 // reload that did not happen. That session's prompt is the one recorded in
 // its file — the same rule the tools follow — and there is nothing here to
 // read again.
-func reloadPrompt(application *app.App, prompts *promptSource, out io.Writer) error {
+func reloadPrompt(application *app.App, prompts *assembly.PromptSource, out io.Writer) error {
 	result, err := application.ReloadSystemPrompt()
 	if err != nil {
 		return err
@@ -36,7 +37,7 @@ func reloadPrompt(application *app.App, prompts *promptSource, out io.Writer) er
 
 	// The app asked this source a moment ago — it is the source the session
 	// was started with — so last() is what the prompt in effect was made of.
-	build := prompts.last()
+	build := prompts.Last()
 	unchanged := ""
 	if !result.Changed {
 		unchanged = " (unchanged)"

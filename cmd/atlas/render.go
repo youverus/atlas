@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"pi-go/internal/app"
-	"pi-go/internal/tool"
 	"pi-go/internal/wire"
 )
 
@@ -314,17 +313,6 @@ func (r *renderer) closeTool(tail string) error {
 	r.tool = toolLine{}
 	_, err := io.WriteString(r.out, tail+"\n")
 	return err
-}
-
-// approvalSubject is the one line that names what the call would do: the tool
-// and its arguments. Both readers show it, so the terminal box and the piped
-// question cannot describe the same call two ways.
-func approvalSubject(call tool.Call) string {
-	subject := call.Name
-	if compact := compactJSON(call.Arguments, 100); compact != "" {
-		subject += "  " + compact
-	}
-	return subject
 }
 
 // startText opens an answer with the solid bullet, on a line of its own.

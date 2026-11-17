@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"pi-go/internal/assembly"
 	"pi-go/internal/config"
 	"pi-go/internal/session"
 	"pi-go/internal/tool"
@@ -40,15 +41,15 @@ func TestTheTaskToolsJoinTheSet(t *testing.T) {
 		t.Fatalf("session: %v", err)
 	}
 	spill := tool.NewSpill(func() string { return t.TempDir() })
-	wiring := tasksFor(manager, spill)
-	if wiring.service == nil {
+	wiring := assembly.TasksFor(manager, spill)
+	if wiring.Service == nil {
 		t.Skip("this platform has no detached runner")
 	}
-	if len(wiring.tools) != 3 {
-		t.Fatalf("want three task tools, got %d", len(wiring.tools))
+	if len(wiring.Tools) != 3 {
+		t.Fatalf("want three task tools, got %d", len(wiring.Tools))
 	}
 
-	set := toolSet(&config.Config{}, nil, nil, noGit, nil, wiring)
+	set := assembly.ToolSet(&config.Config{}, nil, nil, noGit, nil, wiring)
 	list := names(set(t.TempDir()))
 	for _, want := range []string{"task_query", "task_output", "task_stop", "bash"} {
 		if !holding(list, want) {
@@ -77,7 +78,7 @@ func TestTheTaskToolsJoinTheSet(t *testing.T) {
 // Without the service the set must look exactly like it did before tasks
 // existed: no tools, and no argument that could only fail.
 func TestTheSetWithoutTasks(t *testing.T) {
-	set := toolSet(&config.Config{}, nil, nil, noGit, nil, taskWiring{})
+	set := assembly.ToolSet(&config.Config{}, nil, nil, noGit, nil, assembly.TaskWiring{})
 	list := names(set(t.TempDir()))
 	for _, unwanted := range []string{"task_query", "task_output", "task_stop"} {
 		if holding(list, unwanted) {
@@ -103,11 +104,11 @@ func TestTaskRecordsLiveInTheSessionDirectory(t *testing.T) {
 		t.Fatalf("session: %v", err)
 	}
 	spill := tool.NewSpill(func() string { return filepath.Join(dir, spillDirName) })
-	wiring := tasksFor(manager, spill)
-	if wiring.service == nil {
+	wiring := assembly.TasksFor(manager, spill)
+	if wiring.Service == nil {
 		t.Skip("this platform has no detached runner")
 	}
-	if got, want := wiring.service.Path(), filepath.Join(manager.Dir(), "tasks.jsonl"); got != want {
+	if got, want := wiring.Service.Path(), filepath.Join(manager.Dir(), "tasks.jsonl"); got != want {
 		t.Fatalf("record file: got %s, want %s", got, want)
 	}
 }

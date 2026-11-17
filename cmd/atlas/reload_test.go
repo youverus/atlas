@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"pi-go/internal/app"
+	"pi-go/internal/assembly"
 	"pi-go/internal/provider/faux"
 	"pi-go/internal/tool/fs"
 	"pi-go/internal/wire"
@@ -18,13 +19,13 @@ import (
 
 // liveApp builds a session whose prompt comes from a source, and returns the
 // provider so a test can look at the requests it sent.
-func liveApp(t *testing.T, cwd string, prompts *promptSource, responses ...faux.Response) (*app.App, *faux.Provider) {
+func liveApp(t *testing.T, cwd string, prompts *assembly.PromptSource, responses ...faux.Response) (*app.App, *faux.Provider) {
 	t.Helper()
 	prov := faux.New(responses...)
 	application, err := app.New(app.Config{
 		Model:        wire.Model{ID: "faux-1", Name: "Faux", API: "faux", Provider: "faux"},
 		Provider:     prov,
-		SystemPrompt: prompts.prompt,
+		SystemPrompt: prompts.Prompt,
 		Tools:        app.StaticTools(fs.Tools(fs.Options{Cwd: cwd})),
 	}, memoryAt(t, cwd))
 	if err != nil {
@@ -39,7 +40,7 @@ func liveApp(t *testing.T, cwd string, prompts *promptSource, responses ...faux.
 func TestTheNextTurnReadsTheProjectFileAgain(t *testing.T) {
 	emptyHome(t)
 	cwd := t.TempDir()
-	prompts := promptBuilder{}.source()
+	prompts := assembly.NewPrompts("", false, false).Source()
 	application, prov := liveApp(t, cwd, prompts,
 		faux.Response{Text: "first"},
 		faux.Response{Text: "second"},
@@ -75,7 +76,7 @@ func TestTheNextTurnReadsTheProjectFileAgain(t *testing.T) {
 func TestTheNextTurnListsASkillInstalledMidSession(t *testing.T) {
 	emptyHome(t)
 	cwd := t.TempDir()
-	prompts := promptBuilder{}.source()
+	prompts := assembly.NewPrompts("", false, false).Source()
 	application, prov := liveApp(t, cwd, prompts,
 		faux.Response{Text: "first"},
 		faux.Response{Text: "second"},
@@ -102,7 +103,7 @@ func TestTheNextTurnListsASkillInstalledMidSession(t *testing.T) {
 func TestReloadSaysWhatItRead(t *testing.T) {
 	emptyHome(t)
 	cwd := t.TempDir()
-	prompts := promptBuilder{}.source()
+	prompts := assembly.NewPrompts("", false, false).Source()
 	application, _ := liveApp(t, cwd, prompts, faux.Response{Text: "hi"})
 
 	// Nothing has changed yet: the file was read at startup and the prompt
@@ -141,7 +142,7 @@ func TestReloadSaysWhatItRead(t *testing.T) {
 func TestReloadSaysTheSessionCarriesItsOwnInstructions(t *testing.T) {
 	emptyHome(t)
 	cwd := t.TempDir()
-	prompts := promptBuilder{}.source()
+	prompts := assembly.NewPrompts("", false, false).Source()
 	application, _ := liveApp(t, cwd, prompts, faux.Response{Text: "hi"})
 
 	// The session records its own prompt, the way a conversation started in
@@ -166,15 +167,15 @@ func TestTheFlagsLeaveThePromptByteForByte(t *testing.T) {
 	putFile(t, filepath.Join(dir, "AGENTS.md"), "# project rules\n")
 	putFile(t, filepath.Join(dir, ".atlas", "skills", "deploy", "SKILL.md"), skillFile("deploy", "Deploy it."))
 
-	plain, err := promptBuilder{}.build(dir)
+	plain, err := assembly.NewPrompts("", false, false).Build(dir)
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}
-	noContext, err := promptBuilder{noContext: true}.build(dir)
+	noContext, err := assembly.NewPrompts("", true, false).Build(dir)
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}
-	noSkills, err := promptBuilder{noSkills: true}.build(dir)
+	noSkills, err := assembly.NewPrompts("", false, true).Build(dir)
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}

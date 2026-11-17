@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 
 	"pi-go/internal/app"
+	"pi-go/internal/assembly"
 )
 
 // initPrompt asks the model to write AGENTS.md.
@@ -39,7 +40,7 @@ Write it with the write tool. If AGENTS.md already exists, read it first and imp
 // the next question already uses the file; the reload makes that true now
 // rather than at the next turn, and it reports a file that cannot be read
 // instead of leaving the failure to arrive with somebody's question.
-func initProject(ctx context.Context, application *app.App, out io.Writer, render *renderer, prompts *promptSource) error {
+func initProject(ctx context.Context, application *app.App, out io.Writer, render *renderer, prompts *assembly.PromptSource) error {
 	if err := ask(ctx, application, initPrompt, render); err != nil {
 		return err
 	}
@@ -48,7 +49,7 @@ func initProject(ctx context.Context, application *app.App, out io.Writer, rende
 	if err != nil {
 		return fmt.Errorf("AGENTS.md was not written: %w", err)
 	}
-	fmt.Fprintf(out, "agents: %s (%d bytes)%s\n", path, info.Size(), prompts.note())
+	fmt.Fprintf(out, "agents: %s (%d bytes)%s\n", path, info.Size(), prompts.Note())
 	if _, err := application.ReloadSystemPrompt(); err != nil {
 		return err
 	}

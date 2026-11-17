@@ -14,18 +14,18 @@ set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib.sh"
 cd "$TREE_ROOT"
 
-step "cli: only cmd/atlas names a concrete adapter"
+step "cli: only internal/assembly names a concrete adapter"
 adapters="$(go list -f '{{.ImportPath}} {{join .Imports " "}}' ./... |
 	awk -v o="pi-go/internal/provider/openai" -v a="pi-go/internal/provider/anthropic" \
 		-v r="pi-go/internal/provider/responses" -v g="pi-go/internal/provider/google" \
 		'{for (i = 2; i <= NF; i++) if ($i == o || $i == a || $i == r || $i == g) { print $1; break }}' |
 	sort -u)"
-if [[ $adapters != "pi-go/cmd/atlas" ]]; then
+if [[ $adapters != "pi-go/internal/assembly" ]]; then
 	fail "these packages import a concrete adapter: ${adapters//$'\n'/, }"
-	fail "choosing a vendor belongs in pi-go/cmd/atlas alone"
+	fail "choosing a vendor belongs in pi-go/internal/assembly alone"
 	exit 1
 fi
-ok "cmd/atlas is the only package that imports an adapter"
+ok "internal/assembly is the only package that imports an adapter"
 
 step "cli: the binary builds"
 go build -o /dev/null ./cmd/atlas

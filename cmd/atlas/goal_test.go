@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"pi-go/internal/app"
+	"pi-go/internal/assembly"
 	"pi-go/internal/provider/faux"
 	"pi-go/internal/session"
 	"pi-go/internal/tool/fs"
@@ -42,7 +43,7 @@ func goalApp(t *testing.T, manager *session.Manager, cwd string, budget int, res
 	application, err := app.New(app.Config{
 		Model:        wire.Model{ID: "faux-1", Name: "Faux", API: "faux", Provider: "faux"},
 		Provider:     faux.New(responses...),
-		SystemPrompt: promptBuilder{noSkills: true}.source().prompt,
+		SystemPrompt: assembly.NewPrompts("", false, true).Source().Prompt,
 		Tools:        app.StaticTools(fs.Tools(fs.Options{Cwd: cwd})),
 		GoalBudget:   budget,
 	}, manager)

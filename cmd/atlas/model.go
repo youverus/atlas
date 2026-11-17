@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"pi-go/internal/app"
+	"pi-go/internal/assembly"
 	"pi-go/internal/config"
 	"pi-go/internal/tui"
 )
@@ -121,7 +122,7 @@ func resolveSpec(cfg *config.Config, spec string) (selection config.Selection, f
 		// exist instead of quoting the suffix back at them.
 		return config.Selection{}, "", "", baseErr
 	}
-	fitted, adjustment, err = fitThinking(selection, level)
+	fitted, adjustment, err = assembly.FitThinking(selection, level)
 	if err != nil {
 		return config.Selection{}, "", "", err
 	}

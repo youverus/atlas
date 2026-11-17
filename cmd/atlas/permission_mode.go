@@ -136,7 +136,7 @@ func writePermissionStatus(state *sideState, out io.Writer) error {
 func (s *sideState) hasEngine() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.engine != nil
+	return s.gate.Engine() != nil
 }
 
 // permissionMode and setPermissionMode are the engine's mode behind the state's
@@ -144,7 +144,7 @@ func (s *sideState) hasEngine() bool {
 // own lock guards the value but not this struct.
 func (s *sideState) permissionMode() string {
 	s.mu.Lock()
-	engine := s.engine
+	engine := s.gate.Engine()
 	s.mu.Unlock()
 	if engine == nil {
 		return ""
@@ -154,7 +154,7 @@ func (s *sideState) permissionMode() string {
 
 func (s *sideState) setPermissionMode(mode string) error {
 	s.mu.Lock()
-	engine := s.engine
+	engine := s.gate.Engine()
 	s.mu.Unlock()
 	if engine == nil {
 		return fmt.Errorf("%s: this mode has no permission engine", permissionTrigger)

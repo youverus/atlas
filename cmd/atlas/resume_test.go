@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"pi-go/internal/app"
+	"pi-go/internal/assembly"
 	"pi-go/internal/provider/faux"
 	"pi-go/internal/session"
 	"pi-go/internal/tui"
@@ -181,6 +182,23 @@ func TestUniqueShortIDExtendsClashes(t *testing.T) {
 	}
 }
 
+// resumeRequest is the -resume half of runConfigured: the prefix is resolved
+// against the session list here, because the search and the candidates it
+// refused belong to the terminal, and only the resolved path reaches the kernel.
+func resumeRequest(t *testing.T, opts options, dir, cwd string) assembly.Options {
+	t.Helper()
+	request := opts.assembly()
+	if opts.resumePath == "" {
+		return request
+	}
+	target, err := resolveResumeTarget(opts.resumePath, dir, cwd)
+	if err != nil {
+		t.Fatalf("resolve %q: %v", opts.resumePath, err)
+	}
+	request.SessionPath = target
+	return request
+}
+
 // The -resume flag opens the session it names, by path or by id prefix, before
 // the session starts.
 func TestResumeFlagOpensTheNamedSession(t *testing.T) {
@@ -196,7 +214,7 @@ func TestResumeFlagOpensTheNamedSession(t *testing.T) {
 		if err != nil {
 			t.Fatalf("parse -resume %q: %v", spec, err)
 		}
-		manager, _, err := openSession(opts, dir, cwd, true)
+		manager, _, err := assembly.OpenSession(resumeRequest(t, opts, dir, cwd), dir, cwd, true)
 		if err != nil {
 			t.Fatalf("open -resume %q: %v", spec, err)
 		}
@@ -279,7 +297,7 @@ func TestResumeFlagReportsAnAmbiguousPrefix(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
-	if _, _, err := openSession(opts, dir, cwd, true); err == nil || !strings.Contains(err.Error(), "several sessions match") {
+	if _, err := resolveResumeTarget(opts.resumePath, dir, cwd); err == nil || !strings.Contains(err.Error(), "several sessions match") {
 		t.Fatalf("err = %v, want an ambiguity error", err)
 	}
 }

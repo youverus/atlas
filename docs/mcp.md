@@ -133,7 +133,7 @@ SSE 分帧想复用 `internal/provider/sse`：它的 `Event` 已经带 `ID` / `N
 - 两级文件：全局 `$ATLAS_HOME/mcp.json`，项目 `<cwd>/.atlas/mcp.json`（项目级目录沿用 `theme` 的约定，`internal/theme/library.go:292`）。项目级只覆盖 `enabled`，`command` / `url` / `headers` / `auth` / `scopes` / `tools` 出现在项目级就是错误——一个能改 argv 或加凭据的项目文件是仓库里的代码执行，而 atlas 没有 pi 的"项目被信任"那套。项目条目引用的名字必须在全局里存在，否则报错：静默忽略会让"我明明写了"变成一次猜谜。
 - `type` 可省：有 `url` 就是 http，有 `command` 就是 stdio，两个都有或都没有就报错。`"type": "sse"` 明确拒绝并指向 streamable HTTP 的 `/mcp` 端点。
 - `timeout` 秒，缺省 60，语义照抄 pi。第一版按调用计时而不是按会话，理由见第 10 节第 4 条。
-- `description` 第一版不认：它进的是系统提示词的服务器列表，而 atlas 的 `system.md` 是静态的，加一段要动 `promptBuilder`（`cmd/atlas/prompt.go:70`）。没有消费者的键不写进解析器。
+- `description` 第一版不认：它进的是系统提示词的服务器列表，而 atlas 的 `system.md` 是静态的，加一段要动 `Prompts`（`internal/assembly/prompt.go`）。没有消费者的键不写进解析器。
 - `${NAME}` 做，整值 `!command` 不做——后者要在配置里执行 shell，而 `${NAME}` 已经够表达"秘密别写在文件里"。
 - 未知字段报错，照 `internal/config` 现有的严格解码（`config.json` 与 `tui.json` 都拒绝未知字段，块里的错报全路径）。
 - `tools` 是 0.12.11 加的，字符串数组，按服务器自己的拼写。空串与重名两个都报错（前者是打错，后者是手滑）；白名单里写了服务器不声明的名字不报错但在启动时打一行 warning，因为"我明明写了"和"这个服务器没有"必须能分开。它属于项目级不许写的键：宽严都能改工具表，而宽严都是读者在全局里定的。
@@ -247,7 +247,7 @@ SSE 分帧想复用 `internal/provider/sse`：它的 `Event` 已经带 `ID` / `N
 
 三处实测推翻的估计：
 
-**七、把 progress 接到 `tool.Partial` 不等于界面上看得见。** 计划只写到"接上 `tool.Partial`"，而那一环是通的：`agent.execute` 把每个 `Partial` 发成 `tool_execution_update`（`internal/agent/dispatch.go:176`）。但那一轮屏幕那头没有分支——`internal/tui/events.go` 的 switch 与 `cmd/atlas/render.go` 都只认 `tool_execution_start` / `tool_execution_end`，所以当时只有 `--json` 与 `-rpc` 的消费者看得到，全屏会话里一个长任务仍然像卡住。那时没顺手补有两个理由：渲染粒度没定（一行覆盖一行，还是每分钟一行），以及那纯粹是界面侧的改动。**下一轮补上了，粒度选"覆盖同一行"**：块上多一栏 `Block.Progress`，与结果那栏 `Note` 分开——否则结果落地时 `endTool` 会把 `3/10` 和"42 output lines"拼在一起；节流 250ms（服务器按自己的节奏报，快的会比重绘还快，而每秒变四次已经够"活着"）；消息折成一行截到 60 字（尾巴按约定只有一行，带换行的 message 不能把调用撑成一块）；结果落地、并行调用关掉上一行、中断收尾这三处都把这一栏清空。没选"每分钟一行"是因为它会往 transcript 里加行：一个跑十分钟的构建就是十行只说明"还在跑"的噪音。
+**七、把 progress 接到 `tool.Partial` 不等于界面上看得见。** 计划只写到"接上 `tool.Partial`"，而那一环是通的：`agent.execute` 把每个 `Partial` 发成 `tool_execution_update`（`internal/agent/dispatch.go:176`）。但那一轮屏幕那头没有分支——`internal/tui/events.go`（现 `internal/transcript/event.go`）的 switch 与 `cmd/atlas/render.go` 都只认 `tool_execution_start` / `tool_execution_end`，所以当时只有 `--json` 与 `-rpc` 的消费者看得到，全屏会话里一个长任务仍然像卡住。那时没顺手补有两个理由：渲染粒度没定（一行覆盖一行，还是每分钟一行），以及那纯粹是界面侧的改动。**下一轮补上了，粒度选"覆盖同一行"**：块上多一栏 `Block.Progress`，与结果那栏 `Note` 分开——否则结果落地时 `endTool` 会把 `3/10` 和"42 output lines"拼在一起；节流 250ms（服务器按自己的节奏报，快的会比重绘还快，而每秒变四次已经够"活着"）；消息折成一行截到 60 字（尾巴按约定只有一行，带换行的 message 不能把调用撑成一块）；结果落地、并行调用关掉上一行、中断收尾这三处都把这一栏清空。没选"每分钟一行"是因为它会往 transcript 里加行：一个跑十分钟的构建就是十行只说明"还在跑"的噪音。
 
 **八、`GET` 撞坏了一处既有的假服务器。** `TestRefreshOnce` 的 handler 把"非 `/token` 的请求"都当成 JSON-RPC `POST`，于是新的 `GET /mcp` 走进来把空 body 交给 `json.Unmarshal`，报 `unexpected end of JSON input`。改法是给那个 handler 加一条 `GET → 405` 的守卫，而不是让 `readStream` 少发一次请求：那个假设本来就只在测试里成立，而 `GET` 是规范允许的行为。`http_test.go` 里两条同形的 handler 提前加了同样的守卫（它们也是先把 body 读出来再分派），三处注释写的都是"这台假服务器没有流通道"。
 

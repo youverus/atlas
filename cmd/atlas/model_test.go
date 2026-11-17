@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"pi-go/internal/app"
+	"pi-go/internal/assembly"
 	"pi-go/internal/config"
 	"pi-go/internal/provider"
 	"pi-go/internal/provider/openai"
@@ -69,10 +70,10 @@ func pickerApp(t *testing.T, cfg *config.Config, providerName, modelID, thinking
 		if err != nil {
 			return wire.Model{}, nil, err
 		}
-		return modelOf(selection), cancelled{}, nil
+		return assembly.ModelOf(selection), cancelled{}, nil
 	}
 	application, err := app.New(app.Config{
-		Model:         modelOf(selection),
+		Model:         assembly.ModelOf(selection),
 		Provider:      cancelled{},
 		ThinkingLevel: thinking,
 		Resolver:      resolver,
@@ -215,24 +216,24 @@ func TestThinkingLevelsAreFittedToTheModel(t *testing.T) {
 		{r1, "minimal", "", false, "not one of"},
 	}
 	for _, tc := range cases {
-		fitted, adjustment, err := fitThinking(tc.selection, tc.level)
+		fitted, adjustment, err := assembly.FitThinking(tc.selection, tc.level)
 		if tc.wantErr != "" {
 			if err == nil {
-				t.Fatalf("fitThinking(%s, %q) = nil error, want a failure", tc.selection.Name(), tc.level)
+				t.Fatalf("assembly.FitThinking(%s, %q) = nil error, want a failure", tc.selection.Name(), tc.level)
 			}
 			if !strings.Contains(err.Error(), tc.wantErr) {
-				t.Fatalf("fitThinking(%s, %q) error = %v, want %q", tc.selection.Name(), tc.level, err, tc.wantErr)
+				t.Fatalf("assembly.FitThinking(%s, %q) error = %v, want %q", tc.selection.Name(), tc.level, err, tc.wantErr)
 			}
 			continue
 		}
 		if err != nil {
-			t.Fatalf("fitThinking(%s, %q): %v", tc.selection.Name(), tc.level, err)
+			t.Fatalf("assembly.FitThinking(%s, %q): %v", tc.selection.Name(), tc.level, err)
 		}
 		if fitted != tc.want {
-			t.Fatalf("fitThinking(%s, %q) = %q, want %q", tc.selection.Name(), tc.level, fitted, tc.want)
+			t.Fatalf("assembly.FitThinking(%s, %q) = %q, want %q", tc.selection.Name(), tc.level, fitted, tc.want)
 		}
 		if got := adjustment != ""; got != tc.adjustment {
-			t.Fatalf("fitThinking(%s, %q) note = %q, want a note: %v", tc.selection.Name(), tc.level, adjustment, tc.adjustment)
+			t.Fatalf("assembly.FitThinking(%s, %q) note = %q, want a note: %v", tc.selection.Name(), tc.level, adjustment, tc.adjustment)
 		}
 	}
 }

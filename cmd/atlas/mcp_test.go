@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"pi-go/internal/assembly"
 	"pi-go/internal/config"
 	"pi-go/internal/mcp"
 	"pi-go/internal/tool"
@@ -48,7 +49,7 @@ func TestMCPToolsShareOneFooterGroup(t *testing.T) {
 func TestMCPReportWithoutServers(t *testing.T) {
 	var out bytes.Buffer
 	path := filepath.Join(t.TempDir(), "mcp.json")
-	if err := (mcpState{path: path}).report(context.Background(), nil, &out); err != nil {
+	if err := (mcpState{assembly.MCPDescription(path, nil, nil)}).report(context.Background(), nil, &out); err != nil {
 		t.Fatalf("report: %v", err)
 	}
 	if !strings.Contains(out.String(), path) {
@@ -228,10 +229,11 @@ func TestMCPReportNeedsLogin(t *testing.T) {
 // reader can make before any network call, each answered with what to type
 // instead.
 func TestMCPLoginRefuses(t *testing.T) {
-	state := mcpState{
-		path:  filepath.Join(t.TempDir(), "mcp.json"),
-		specs: []mcp.Spec{{Name: "headers-only", URL: "https://example.com/mcp"}},
-	}
+	state := mcpState{assembly.MCPDescription(
+		filepath.Join(t.TempDir(), "mcp.json"),
+		[]mcp.Spec{{Name: "headers-only", URL: "https://example.com/mcp"}},
+		nil,
+	)}
 	for _, tc := range []struct {
 		name string
 		args []string
@@ -258,32 +260,32 @@ func TestMCPLoginRefuses(t *testing.T) {
 	}
 }
 
-// TestMCPForReadsTheConfiguredHome pins the wiring: mcpFor resolves the home
+// TestMCPForReadsTheConfiguredHome pins the wiring: the kernel resolves the home
 // directory, reads the file there, and reports a broken one as an error rather
 // than as an empty session.
 func TestMCPForReadsTheConfiguredHome(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("ATLAS_HOME", home)
 
-	state, notes, err := mcpFor(context.Background(), t.TempDir(), nil)
+	state, notes, err := assembly.NewMCP(context.Background(), t.TempDir(), nil, "test")
 	if err != nil {
-		t.Fatalf("mcpFor: %v", err)
+		t.Fatalf("testMCP: %v", err)
 	}
 	if len(notes) != 0 {
 		t.Fatalf("notes = %v, want none", notes)
 	}
-	if state.path != filepath.Join(home, config.MCPFileName) {
-		t.Fatalf("path = %q, want the file under ATLAS_HOME", state.path)
+	if state.Path() != filepath.Join(home, config.MCPFileName) {
+		t.Fatalf("path = %q, want the file under ATLAS_HOME", state.Path())
 	}
-	if len(state.tools()) != 0 {
-		t.Fatalf("tools = %d, want none without a file", len(state.tools()))
+	if len(state.Tools()) != 0 {
+		t.Fatalf("tools = %d, want none without a file", len(state.Tools()))
 	}
 
-	if err := os.WriteFile(state.path, []byte(`{"mcpServers": {"x": {"type": "sse"}}}`), 0o600); err != nil {
+	if err := os.WriteFile(state.Path(), []byte(`{"mcpServers": {"x": {"type": "sse"}}}`), 0o600); err != nil {
 		t.Fatalf("write: %v", err)
 	}
-	if _, _, err := mcpFor(context.Background(), t.TempDir(), nil); err == nil {
-		t.Fatal("mcpFor succeeded, want the config refusal")
+	if _, _, err := assembly.NewMCP(context.Background(), t.TempDir(), nil, "test"); err == nil {
+		t.Fatal("testMCP succeeded, want the config refusal")
 	} else if !strings.Contains(err.Error(), "streamable HTTP") {
 		t.Fatalf("error = %v, want the sse hint", err)
 	}

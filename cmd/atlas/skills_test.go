@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"pi-go/internal/assembly"
 	"pi-go/internal/config"
 	"pi-go/internal/skill"
 )
@@ -25,7 +26,7 @@ func TestTheSkillDirectoryFollowsTheContext(t *testing.T) {
 	putFile(t, filepath.Join(dir, ".atlas", "skills", "deploy", "SKILL.md"), skillFile("deploy", "Deploy it."))
 	putFile(t, filepath.Join(dir, "AGENTS.md"), "# project rules\n")
 
-	build, err := promptBuilder{}.build(dir)
+	build, err := assembly.NewPrompts("", false, false).Build(dir)
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}
@@ -71,7 +72,7 @@ func TestTheSharedRootIsRead(t *testing.T) {
 	}
 	putFile(t, filepath.Join(user, ".agents", "skills", "release", "SKILL.md"), skillFile("release", "Cut a release."))
 
-	build, err := promptBuilder{}.build(t.TempDir())
+	build, err := assembly.NewPrompts("", false, false).Build(t.TempDir())
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}
@@ -90,11 +91,11 @@ func TestNoSkillsLeavesThePromptAlone(t *testing.T) {
 	home := emptyHome(t)
 	putFile(t, filepath.Join(home, "skills", "release", "SKILL.md"), skillFile("release", "Cut a release."))
 
-	build, err := promptBuilder{noSkills: true}.build(t.TempDir())
+	build, err := assembly.NewPrompts("", false, true).Build(t.TempDir())
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}
-	if build.Text != builtinPrompt {
+	if build.Text != builtinText(t) {
 		t.Fatalf("prompt = %q, want the built-in prompt unchanged", build.Text)
 	}
 	if len(build.Notes) != 0 {
@@ -110,11 +111,11 @@ func TestABadSkillIsReportedAndTheSessionGoesOn(t *testing.T) {
 	path := filepath.Join(home, "skills", "broken", "SKILL.md")
 	putFile(t, path, "no frontmatter here\n")
 
-	build, err := promptBuilder{}.build(t.TempDir())
+	build, err := assembly.NewPrompts("", false, false).Build(t.TempDir())
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}
-	if build.Text != builtinPrompt {
+	if build.Text != builtinText(t) {
 		t.Fatalf("prompt = %q, want the built-in prompt", build.Text)
 	}
 	if len(build.Notes) != 1 || !strings.HasPrefix(build.Notes[0], "skill: "+path+": ") {
@@ -130,7 +131,7 @@ func TestTheTwoSwitchesAreIndependent(t *testing.T) {
 	putFile(t, filepath.Join(home, "skills", "release", "SKILL.md"), skillFile("release", "Cut a release."))
 	putFile(t, filepath.Join(dir, "AGENTS.md"), "# project rules\n")
 
-	skillsBuild, err := promptBuilder{noContext: true}.build(dir)
+	skillsBuild, err := assembly.NewPrompts("", true, false).Build(dir)
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}
@@ -139,7 +140,7 @@ func TestTheTwoSwitchesAreIndependent(t *testing.T) {
 		t.Fatalf("prompt = %q, want the skills and no context files", withSkills)
 	}
 
-	contextBuild, err := promptBuilder{noSkills: true}.build(dir)
+	contextBuild, err := assembly.NewPrompts("", false, true).Build(dir)
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}
@@ -169,7 +170,7 @@ func TestTheFourRootsAreReadInOrder(t *testing.T) {
 		{filepath.Join(cwd, ".atlas", "skills"), skill.Project},
 		{filepath.Join(cwd, ".agents", "skills"), skill.ProjectShared},
 	}
-	roots := skillRoots(cwd)
+	roots := assembly.SkillRoots(cwd)
 	if len(roots) != len(want) {
 		t.Fatalf("roots = %v, want %d", roots, len(want))
 	}
@@ -192,7 +193,7 @@ func TestAPluginSkillRootSitsBeforeTheProject(t *testing.T) {
 	putFile(t, pluginSkill, skillFile("deploy", "Deploy from the plugin."))
 	putFile(t, filepath.Join(cwd, ".atlas", "skills", "deploy", "SKILL.md"), skillFile("deploy", "Deploy from the checkout."))
 
-	roots := skillRoots(cwd)
+	roots := assembly.SkillRoots(cwd)
 	want := []skill.Scope{skill.User, skill.Shared, skill.Plugin, skill.Project, skill.ProjectShared}
 	if len(roots) != len(want) {
 		t.Fatalf("roots = %v, want %d", roots, len(want))
@@ -203,7 +204,7 @@ func TestAPluginSkillRootSitsBeforeTheProject(t *testing.T) {
 		}
 	}
 
-	found, notes := availableSkills(cwd)
+	found, notes := assembly.AvailableSkills(cwd)
 	if len(found) != 1 {
 		t.Fatalf("skills = %v, notes = %v, want one skill and the shadowed note", found, notes)
 	}
@@ -223,9 +224,20 @@ func TestAPluginAddsNothingUnlessItHasSkills(t *testing.T) {
 	putFile(t, filepath.Join(home, config.PluginDirName, "servers-only", "plugin.json"),
 		`{"mcpServers": {"lint": {"command": "true"}}}`)
 
-	for _, root := range skillRoots(cwd) {
+	for _, root := range assembly.SkillRoots(cwd) {
 		if root.Scope == skill.Plugin {
 			t.Fatalf("root = %+v, want no plugin root for a plugin without skills", root)
 		}
 	}
+}
+
+// builtinText is the prompt with nothing added to it, which is what a build of
+// an empty directory has to equal byte for byte.
+func builtinText(t *testing.T) string {
+	t.Helper()
+	text, err := assembly.BasePrompt("")
+	if err != nil {
+		t.Fatalf("base prompt: %v", err)
+	}
+	return text
 }

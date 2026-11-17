@@ -1,4 +1,4 @@
-package main
+package assembly
 
 import (
 	"fmt"
@@ -11,19 +11,23 @@ import (
 	"pi-go/internal/wire"
 )
 
-// modelFacts is what a model can do once the config declaration and the
-// embedded table are merged. Every surface that reports or acts on a model
-// reads it from here, so the printed list, the menu and the request cannot
-// disagree about the same model.
-type modelFacts struct {
-	name          string
-	contextWindow int
-	maxTokens     int
-	input         []string
-	gears         []string
+// Facts is what a model can do once the config declaration and the embedded
+// table are merged. Every surface that reports or acts on a model reads it from
+// here, so the printed list, the menu and the request cannot disagree about the
+// same model.
+//
+// The fields are exported because two front ends draw the same list: the CLI
+// prints a table and a menu, and a window prints its own. Both need the numbers
+// this struct merged, and neither is allowed to merge them a second way.
+type Facts struct {
+	Name          string
+	ContextWindow int
+	MaxTokens     int
+	Input         []string
+	Gears         []string
 }
 
-// factsOf merges a declaration with the table.
+// FactsOf merges a declaration with the table.
 //
 // The rule is the same for every field: a declared value is a statement about
 // this endpoint and wins, and a zero is not a statement, so the table fills it.
@@ -39,46 +43,46 @@ type modelFacts struct {
 // the config already declares as reasoning, and a declared ThinkingLevels wins
 // over both: it is the only place that can say "this endpoint collapses those
 // two gears".
-func factsOf(selection config.Selection) modelFacts {
+func FactsOf(selection config.Selection) Facts {
 	declared := selection.Model
-	facts := modelFacts{
-		name:          declared.Name,
-		contextWindow: declared.ContextWindow,
-		maxTokens:     declared.MaxTokens,
-		input:         declared.Input,
-		gears:         declared.Gears(),
+	facts := Facts{
+		Name:          declared.Name,
+		ContextWindow: declared.ContextWindow,
+		MaxTokens:     declared.MaxTokens,
+		Input:         declared.Input,
+		Gears:         declared.Gears(),
 	}
 	entry, known := catalog.Default().Lookup(declared.ID)
 	if !known {
-		if facts.name == "" {
-			facts.name = declared.ID
+		if facts.Name == "" {
+			facts.Name = declared.ID
 		}
 		return facts
 	}
-	if facts.name == "" {
-		facts.name = entry.Name
+	if facts.Name == "" {
+		facts.Name = entry.Name
 	}
-	if facts.contextWindow == 0 {
-		facts.contextWindow = entry.ContextWindow
+	if facts.ContextWindow == 0 {
+		facts.ContextWindow = entry.ContextWindow
 	}
-	if facts.maxTokens == 0 {
-		facts.maxTokens = entry.MaxTokens
+	if facts.MaxTokens == 0 {
+		facts.MaxTokens = entry.MaxTokens
 	}
-	if len(facts.input) == 0 {
-		facts.input = entry.Input
+	if len(facts.Input) == 0 {
+		facts.Input = entry.Input
 	}
 	if declared.Reasoning && len(declared.ThinkingLevels) == 0 && entry.Reasoning {
-		facts.gears = levelNames(entry.Gears())
+		facts.Gears = levelNames(entry.Gears())
 	}
 	// An entry with no display name is possible in the data, and a status line
 	// that printed nothing would read as a bug in the status line.
-	if facts.name == "" {
-		facts.name = declared.ID
+	if facts.Name == "" {
+		facts.Name = declared.ID
 	}
 	return facts
 }
 
-// fitThinking rounds a requested level to one the model offers.
+// FitThinking rounds a requested level to one the model offers.
 //
 // The vocabulary check comes first and stays an error: a typo is not a
 // preference, and rounding "hgih" to off would turn a misspelling into a
@@ -89,7 +93,7 @@ func factsOf(selection config.Selection) modelFacts {
 // A model with no axis at all stays an error too: nothing about that request can
 // be sent, and rounding to off would report success for a model that cannot
 // think.
-func fitThinking(selection config.Selection, level string) (fitted, adjustment string, err error) {
+func FitThinking(selection config.Selection, level string) (fitted, adjustment string, err error) {
 	if level == "" {
 		return "", "", nil
 	}
@@ -101,7 +105,7 @@ func fitThinking(selection config.Selection, level string) (fitted, adjustment s
 		// including one that cannot think, so it is never fitted.
 		return level, "", nil
 	}
-	gears := factsOf(selection).gears
+	gears := FactsOf(selection).Gears
 	if slices.Contains(gears, level) {
 		return level, "", nil
 	}
@@ -133,7 +137,7 @@ func levelNames(values []catalog.Level) []string {
 	return names
 }
 
-// modelTable is the switch list the kernel cycles through and answers
+// ModelTable is the switch list the kernel cycles through and answers
 // get_available_models with.
 //
 // It carries each model's thinking levels because the kernel cannot look them
@@ -141,31 +145,31 @@ func levelNames(values []catalog.Level) []string {
 // actually exposes, and a transport that guessed at them would be the second
 // place deciding what a model can do. The order is the config's, so a cycle walks
 // the providers in a stable order rather than a map's.
-func modelTable(cfg *config.Config) []app.ModelOption {
+func ModelTable(cfg *config.Config) []app.ModelOption {
 	selections := cfg.Selections()
 	options := make([]app.ModelOption, 0, len(selections))
 	for _, selection := range selections {
 		options = append(options, app.ModelOption{
-			Model:  modelOf(selection),
-			Levels: factsOf(selection).gears,
+			Model:  ModelOf(selection),
+			Levels: FactsOf(selection).Gears,
 		})
 	}
 	return options
 }
 
-// thinkingFitter gives the kernel the same rounding the command line uses, so a
+// ThinkingFitter gives the kernel the same rounding the command line uses, so a
 // level set over RPC lands where -thinking would have landed it.
 //
 // The config is the table: a model it no longer declares has nothing to fit
 // against, and inventing an axis for it would report a limit that was never read.
 // Passing the level through is what the kernel does with no hook at all, which
 // keeps "not declared" and "declared without limits" from looking the same.
-func thinkingFitter(cfg *config.Config) app.ThinkingFitter {
+func ThinkingFitter(cfg *config.Config) app.ThinkingFitter {
 	return func(model wire.Model, level string) (string, string, error) {
 		selection, err := cfg.Lookup(model.Provider, model.ID)
 		if err != nil {
 			return level, "", nil
 		}
-		return fitThinking(selection, level)
+		return FitThinking(selection, level)
 	}
 }

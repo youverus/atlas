@@ -1,4 +1,4 @@
-package main
+package assembly
 
 import (
 	_ "embed"
@@ -18,13 +18,13 @@ import (
 //go:embed system.md
 var builtinPrompt string
 
-// basePrompt returns the instructions before the project's own files are
+// BasePrompt returns the instructions before the project's own files are
 // appended: the built-in ones, or a file when the user pointed at one.
 //
 // A file replaces the base and nothing else. The project's context files are
 // facts about the code, not a second opinion about how to be an agent, so a
 // caller who brought their own instructions still gets them.
-func basePrompt(path string) (string, error) {
+func BasePrompt(path string) (string, error) {
 	if path == "" {
 		return builtinPrompt, nil
 	}
@@ -39,29 +39,30 @@ func basePrompt(path string) (string, error) {
 	return string(content), nil
 }
 
-// promptBuilder is the prompt question asked of the current directory.
+// Prompts is the prompt question asked of the current directory.
 //
 // It is a value rather than a string because the answer changes: the command
 // writes the file the prompt is made of (/init), and a session that only read
 // it at startup would show the user a file it will not obey until it is
 // restarted.
-type promptBuilder struct {
+type Prompts struct {
 	file      string
 	noContext bool
 	noSkills  bool
 }
 
-// prompts is the builder the command line describes.
-func (o options) prompts() promptBuilder {
-	return promptBuilder{file: o.systemFile, noContext: o.noContextFiles, noSkills: o.noSkills}
+// NewPrompts is the builder a front end describes: which base file, and the two
+// switches that turn off the project files and the skill list.
+func NewPrompts(file string, noContext, noSkills bool) Prompts {
+	return Prompts{file: file, noContext: noContext, noSkills: noSkills}
 }
 
-// promptBuild is one rendering of the prompt and what went into it.
+// PromptBuild is one rendering of the prompt and what went into it.
 //
 // The counts and the paths are what /reload reports: a reader who just wrote
 // a file wants to see that it was read, and a count alone does not say which
 // file it was.
-type promptBuild struct {
+type PromptBuild struct {
 	// Text is the instructions themselves.
 	Text string
 	// ContextFiles are the project files that were read, in the order they
@@ -87,17 +88,17 @@ type promptBuild struct {
 // caveat. They are returned rather than printed because a rebuild happens where
 // there is no terminal writer, and a second scan to print them would answer a
 // question the first scan already answered.
-func (b promptBuilder) build(cwd string) (promptBuild, error) {
-	base, err := basePrompt(b.file)
+func (b Prompts) Build(cwd string) (PromptBuild, error) {
+	base, err := BasePrompt(b.file)
 	if err != nil {
-		return promptBuild{}, err
+		return PromptBuild{}, err
 	}
 	var blocks []string
 	var contextFiles []string
 	if !b.noContext {
-		context, files, err := projectContext(cwd)
+		context, files, err := ProjectContext(cwd)
 		if err != nil {
-			return promptBuild{}, err
+			return PromptBuild{}, err
 		}
 		if context != "" {
 			blocks = append(blocks, context)
@@ -107,7 +108,7 @@ func (b promptBuilder) build(cwd string) (promptBuild, error) {
 	var notes []string
 	skills := 0
 	if !b.noSkills {
-		found, skillNotes := availableSkills(cwd)
+		found, skillNotes := AvailableSkills(cwd)
 		notes = skillNotes
 		skills = len(found)
 		if directory := skill.Directory(found); directory != "" {
@@ -118,7 +119,7 @@ func (b promptBuilder) build(cwd string) (promptBuild, error) {
 	if len(blocks) > 0 {
 		text = strings.TrimRight(base, "\n") + "\n\n" + strings.Join(blocks, "\n\n") + "\n"
 	}
-	return promptBuild{Text: text, ContextFiles: contextFiles, Skills: skills, Notes: notes}, nil
+	return PromptBuild{Text: text, ContextFiles: contextFiles, Skills: skills, Notes: notes}, nil
 }
 
 // note says whether the context files were read, for the one command whose
@@ -127,14 +128,14 @@ func (b promptBuilder) build(cwd string) (promptBuild, error) {
 // The silence of the default case is the point: a session does not announce
 // which files it read on every start, and /init is the only place where the
 // answer is not obvious from the file that was just written.
-func (b promptBuilder) note() string {
+func (b Prompts) Note() string {
 	if b.noContext {
 		return " · not read: -no-context-files is set"
 	}
 	return " · read into the prompt"
 }
 
-// promptSource is the live prompt: the instructions are read from the files
+// PromptSource is the live prompt: the instructions are read from the files
 // behind them every time they are asked for.
 //
 // It is asked once per turn, so a project file that changed and a skill that
@@ -146,21 +147,21 @@ func (b promptBuilder) note() string {
 // to, and a session can move to another project's conversation while this
 // process runs. A builder bound to the startup directory would keep reading
 // the instructions of a project the reader left.
-type promptSource struct {
-	builder promptBuilder
+type PromptSource struct {
+	builder Prompts
 
 	mu    sync.Mutex
-	build promptBuild
+	build PromptBuild
 }
 
 // source turns the builder into the prompt the app asks for.
-func (b promptBuilder) source() *promptSource {
-	return &promptSource{builder: b}
+func (b Prompts) Source() *PromptSource {
+	return &PromptSource{builder: b}
 }
 
 // prompt reads the instructions for cwd. It is the source the app asks for.
-func (s *promptSource) prompt(cwd string) (string, error) {
-	build, err := s.read(cwd)
+func (s *PromptSource) Prompt(cwd string) (string, error) {
+	build, err := s.Read(cwd)
 	if err != nil {
 		return "", err
 	}
@@ -168,10 +169,10 @@ func (s *promptSource) prompt(cwd string) (string, error) {
 }
 
 // read reads the instructions and remembers what the read found.
-func (s *promptSource) read(cwd string) (promptBuild, error) {
-	build, err := s.builder.build(cwd)
+func (s *PromptSource) Read(cwd string) (PromptBuild, error) {
+	build, err := s.builder.Build(cwd)
 	if err != nil {
-		return promptBuild{}, err
+		return PromptBuild{}, err
 	}
 	s.mu.Lock()
 	s.build = build
@@ -180,7 +181,7 @@ func (s *promptSource) read(cwd string) (promptBuild, error) {
 }
 
 // last returns what the last read found. It is empty before the first one.
-func (s *promptSource) last() promptBuild {
+func (s *PromptSource) Last() PromptBuild {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.build
@@ -188,6 +189,6 @@ func (s *promptSource) last() promptBuild {
 
 // note says whether the context files were read, for the one command whose
 // output is about them.
-func (s *promptSource) note() string {
-	return s.builder.note()
+func (s *PromptSource) Note() string {
+	return s.builder.Note()
 }

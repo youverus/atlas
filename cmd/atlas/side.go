@@ -10,7 +10,7 @@ import (
 
 	"pi-go/internal/agent"
 	"pi-go/internal/app"
-	"pi-go/internal/permission"
+	"pi-go/internal/assembly"
 	"pi-go/internal/tool"
 	"pi-go/internal/wire"
 )
@@ -19,23 +19,6 @@ import (
 // front of it: /side switches the prompt into it, /parent switches back, and
 // /side off throws it away. It never reaches disk, so nothing here needs a
 // cleanup path on exit.
-
-// sideReadOnly names the calls a side conversation may make without asking
-// first. It is an allowlist, not a list of dangerous tools: a tool added later
-// has to be classified on purpose instead of quietly escaping the gate.
-var sideReadOnly = map[string]bool{
-	"read": true,
-	"ls":   true,
-	"find": true,
-	"grep": true,
-	// The git tools belong here for the same reason the file readers do: they
-	// only read, and the argv whitelist is what makes that true rather than
-	// promised.
-	"git_status": true,
-	"git_diff":   true,
-	"git_log":    true,
-	"git_show":   true,
-}
 
 // sideCommands are the slash commands that still run while the prompt belongs
 // to the side conversation. Everything else either changes the session the side
@@ -65,24 +48,15 @@ var sideCommands = map[string]bool{
 	"/exit":           true,
 }
 
-// The two things the model is told when a call did not run. Both are one line:
-// the renderer prints a failure's reason under the call, so a paragraph would
-// land in the user's scrollback on every refusal, and the rule it states is
-// short enough to be worth reading anyway.
-const (
-	sideDeclined = "side conversation: the user declined this change. Reads run without asking; changes do not. Do not retry it here."
-	sideNoReader = "side conversation: this change needs approval and there is no terminal to ask on, so only reads run here."
-)
-
 // sideState is what the terminal knows about the side conversation: which one
-// exists, whether the prompt is typing into it, and how a call that would change
-// something gets approved.
+// exists, whether the prompt is typing into it, and which gate decides what a
+// call may do.
 //
-// Approval is decided from this state rather than from the caller. That is
-// exact while the REPL runs one turn at a time — a turn typed into the side
-// conversation is a side turn — and it is what lets the gate live on the app,
-// which builds both agents from one config. A REPL that ever ran two turns at
-// once would have to move the hook onto the side agent instead.
+// The gate itself is the assembly's, because a window asks the same question
+// through a blocking POST that this terminal asks through a keypress. What the
+// terminal adds is the one fact the gate cannot know: whether the next turn is
+// typed into the main conversation or into a side one. That is why
+// beforeToolCall is here and the ladder is not.
 type sideState struct {
 	mu     sync.Mutex
 	side   *app.Side
@@ -92,26 +66,30 @@ type sideState struct {
 	// inherited on that page instead of in a notice: the notice would be the
 	// second copy of one fact, one frame apart from the first.
 	home bool
-	// approve asks the user. Nil denies: a caller with no terminal cannot
-	// approve anything, and guessing yes is the one answer that loses data.
+	// gate is the approval path both conversations pass. Nil means nothing is
+	// gated, which is what a test that never configured permissions gets.
+	gate *assembly.Gate
+	// ask is the question the gate puts to the reader, and note reports a
+	// standing yes. Both are installed per turn because they close over the
+	// turn's sink.
+	ask  func(assembly.Ask) assembly.Answer
+	note func(string)
+	// approve decides by rule instead of by question: a caller that already
+	// knows the answer says so here rather than growing a modal. It is how a
+	// test describes a posture, and it takes precedence over ask.
 	approve func(call tool.Call) bool
-	// allowed is what the reader answered "for this session" to. It lives here
-	// rather than with the gate because the gate is rebuilt for every turn and
-	// this has to outlive them; it is still scoped to one session, which is what
-	// makes it a small permission instead of a large one.
-	allowed allowedTools
-	// engine evaluates the permission ladder for both conversations. In the main
-	// conversation it decides whether a call runs, asks, or is denied; in the
-	// side conversation its deny rules still win before the read-only gate.
-	engine *permission.Engine
 }
 
+// newSideState is a state whose gate has no permission engine behind it. The
+// gate still enforces the read-only boundary of a side conversation and still
+// asks before a write; what it lacks is the mode switch, which is why the demo
+// and every test that does not build an engine use this.
 func newSideState() *sideState {
-	return newSideStateWith(permission.New(permission.Options{Mode: permission.ModeBypass}))
+	return newSideStateWith(assembly.NewGate(nil))
 }
 
-func newSideStateWith(engine *permission.Engine) *sideState {
-	return &sideState{engine: engine}
+func newSideStateWith(gate *assembly.Gate) *sideState {
+	return &sideState{gate: gate}
 }
 
 // typingInSide reports whether the prompt belongs to the side conversation.
@@ -163,42 +141,51 @@ func (s *sideState) discard() {
 	s.typing = false
 }
 
+// setAsk installs the question the gate puts to the reader. The terminal owns it
+// because the question closes over the turn's sink, and the gate outlives the
+// turn.
+func (s *sideState) setAsk(ask func(assembly.Ask) assembly.Answer, note func(string)) {
+	s.mu.Lock()
+	s.ask, s.note = ask, note
+	s.mu.Unlock()
+	s.sync()
+}
+
+// sync hands the current question to the gate. A caller that decides by rule
+// wins over one that asks: there is only ever one of them, and the rule is the
+// more specific statement of intent.
+func (s *sideState) sync() {
+	if s.gate == nil {
+		return
+	}
+	s.mu.Lock()
+	approve, ask, note := s.approve, s.ask, s.note
+	s.mu.Unlock()
+	switch {
+	case approve != nil:
+		s.gate.SetAsk(func(req assembly.Ask) assembly.Answer {
+			return assembly.Answer{Allowed: approve(tool.Call{Name: req.Tool})}
+		}, note)
+	case ask != nil:
+		s.gate.SetAsk(ask, note)
+	}
+}
+
 // beforeToolCall is app.Config.BeforeToolCall: the gate that enforces the
 // permission ladder in the main conversation and the read-only boundary in the
 // side conversation.
+//
+// It reads the typing flag first because that is the half of the decision only
+// this package knows, and hands the rest to the gate the kernel built. A REPL
+// that ever ran two turns at once would have to move both onto the side agent
+// instead.
 func (s *sideState) beforeToolCall(ctx context.Context, call tool.Call) (*agent.Block, error) {
-	s.mu.Lock()
-	typing, approve, engine := s.typing, s.approve, s.engine
-	s.mu.Unlock()
-
-	if typing {
-		if engine != nil {
-			if decision := engine.Decide(call); decision.Behavior == permission.Deny {
-				return &agent.Block{
-					Block:  true,
-					Reason: "permission denied: " + decision.Reason + ". Do not retry or work around this call.",
-				}, nil
-			}
-		}
-		if sideReadOnly[call.Name] {
-			return nil, nil
-		}
-		if approve == nil {
-			return &agent.Block{Block: true, Reason: sideNoReader}, nil
-		}
-		if !approve(call) {
-			return &agent.Block{Block: true, Reason: sideDeclined}, nil
-		}
+	if s == nil || s.gate == nil {
 		return nil, nil
 	}
-
-	if engine == nil {
-		return nil, nil
-	}
-	if blocked, reason := engine.Gate(ctx, call, approve); blocked {
-		return &agent.Block{Block: true, Reason: reason}, nil
-	}
-	return nil, nil
+	s.sync()
+	s.gate.SetTyping(s.typingInSide())
+	return s.gate.BeforeToolCall(ctx, call)
 }
 
 // enter names the conversation the next line is typed into. It is a notice like

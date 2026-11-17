@@ -1,23 +1,22 @@
-package main
+package assembly
 
 import (
 	"testing"
 
 	"pi-go/internal/tool"
-	"pi-go/internal/tui"
 )
 
 // asker counts the questions and answers them from a script. It is the stand-in
 // for the modal: what matters here is which answer the gate takes, not how the
 // box draws it (that is internal/tui's own test).
 type asker struct {
-	reply  tui.AskAnswer
-	asked  []tui.AskRequest
+	reply  Answer
+	asked  []Ask
 	notes  []string
-	prompt func(tui.AskRequest) tui.AskAnswer
+	prompt func(Ask) Answer
 }
 
-func (a *asker) ask(req tui.AskRequest) tui.AskAnswer {
+func (a *asker) ask(req Ask) Answer {
 	a.asked = append(a.asked, req)
 	if a.prompt != nil {
 		return a.prompt(req)
@@ -27,10 +26,13 @@ func (a *asker) ask(req tui.AskRequest) tui.AskAnswer {
 
 func (a *asker) note(text string) { a.notes = append(a.notes, text) }
 
-func gate(t *testing.T, session string, a *asker) (func(tool.Call) bool, *sideState) {
+// approver is the gate the questions go through, with the session fixed so a
+// test can describe a conversation change as a value.
+func approver(t *testing.T, session string, a *asker) func(tool.Call) bool {
 	t.Helper()
-	state := newSideState()
-	return approveTool(state, session, a.ask, a.note), state
+	gate := NewGate(nil)
+	gate.SetAsk(a.ask, a.note)
+	return gate.approveFunc(a.ask, func() string { return session })
 }
 
 func call(name string) tool.Call {
@@ -41,8 +43,8 @@ func call(name string) tool.Call {
 // the same tool in the same session asks once. The note is the one trace left of
 // a permission that no longer draws a box.
 func TestTheStandingAnswerSparesTheNextQuestion(t *testing.T) {
-	a := &asker{reply: tui.AskAnswer{Allowed: true, Always: true}}
-	approve, _ := gate(t, "s1", a)
+	a := &asker{reply: Answer{Allowed: true, Always: true}}
+	approve := approver(t, "s1", a)
 
 	for i := 0; i < 3; i++ {
 		if !approve(call("bash")) {
@@ -65,13 +67,13 @@ func TestTheStandingAnswerSparesTheNextQuestion(t *testing.T) {
 // The standing answer covers one tool. A reader who said yes to running the test
 // suite did not say yes to editing a file.
 func TestTheStandingAnswerIsForOneTool(t *testing.T) {
-	a := &asker{prompt: func(req tui.AskRequest) tui.AskAnswer {
+	a := &asker{prompt: func(req Ask) Answer {
 		if req.Tool == "bash" {
-			return tui.AskAnswer{Allowed: true, Always: true}
+			return Answer{Allowed: true, Always: true}
 		}
-		return tui.AskAnswer{Allowed: true}
+		return Answer{Allowed: true}
 	}}
-	approve, _ := gate(t, "s1", a)
+	approve := approver(t, "s1", a)
 
 	approve(call("bash"))
 	approve(call("bash"))
@@ -87,14 +89,15 @@ func TestTheStandingAnswerIsForOneTool(t *testing.T) {
 // conversation — the files in it, what was said in it — and the next one is a
 // different conversation.
 func TestTheStandingAnswerEndsWithTheSession(t *testing.T) {
-	a := &asker{reply: tui.AskAnswer{Allowed: true, Always: true}}
-	state := newSideState()
+	a := &asker{reply: Answer{Allowed: true, Always: true}}
+	gate := NewGate(nil)
+	gate.SetAsk(a.ask, a.note)
 
-	first := approveTool(state, "s1", a.ask, a.note)
+	first := gate.approveFunc(a.ask, func() string { return "s1" })
 	first(call("bash"))
 	first(call("bash"))
 
-	second := approveTool(state, "s2", a.ask, a.note)
+	second := gate.approveFunc(a.ask, func() string { return "s2" })
 	second(call("bash"))
 
 	if len(a.asked) != 2 {
@@ -111,8 +114,8 @@ func TestTheStandingAnswerEndsWithTheSession(t *testing.T) {
 // A plain yes is a yes this once. It must not become standing by accident: that
 // is the difference between a gate and a formality.
 func TestAPlainYesDoesNotBecomeStanding(t *testing.T) {
-	a := &asker{reply: tui.AskAnswer{Allowed: true}}
-	approve, _ := gate(t, "s1", a)
+	a := &asker{reply: Answer{Allowed: true}}
+	approve := approver(t, "s1", a)
 
 	approve(call("bash"))
 	approve(call("bash"))
@@ -131,13 +134,13 @@ func TestANoIsNotRemembered(t *testing.T) {
 	// The standing bit is set as well, which is the shape a mistake in the
 	// interface would take: a refusal that still carried "for this session".
 	// Recording it would turn one no into a permission for every later call.
-	a := &asker{reply: tui.AskAnswer{Always: true}}
-	approve, _ := gate(t, "s1", a)
+	a := &asker{reply: Answer{Always: true}}
+	approve := approver(t, "s1", a)
 
 	if approve(call("bash")) {
 		t.Fatal("a refusal approved the call")
 	}
-	a.reply = tui.AskAnswer{Allowed: true}
+	a.reply = Answer{Allowed: true}
 	if !approve(call("bash")) {
 		t.Fatal("the second call was refused by the first answer")
 	}
@@ -152,14 +155,13 @@ func TestANoIsNotRemembered(t *testing.T) {
 // The remembered answer is read before the reader is disturbed at all: a screen
 // that still asked would make the third key a keystroke that changes nothing.
 func TestARememberedAnswerAsksNobody(t *testing.T) {
-	a := &asker{reply: tui.AskAnswer{Allowed: true, Always: true}}
-	state := newSideState()
-	approve := approveTool(state, "s1", a.ask, a.note)
+	a := &asker{reply: Answer{Allowed: true, Always: true}}
+	approve := approver(t, "s1", a)
 	approve(call("bash"))
 
-	a.prompt = func(tui.AskRequest) tui.AskAnswer {
+	a.prompt = func(Ask) Answer {
 		t.Fatal("asked a question that was already answered")
-		return tui.AskAnswer{}
+		return Answer{}
 	}
 	if !approve(call("bash")) {
 		t.Fatal("the remembered answer did not approve the call")
