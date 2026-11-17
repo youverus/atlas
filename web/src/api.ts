@@ -34,6 +34,16 @@ export interface SessionInfo {
   current?: boolean;
 }
 
+/** One drawn item of a replayed conversation, mirroring httpapi.TranscriptBlock. */
+export interface TranscriptBlock {
+  role: string;
+  name?: string;
+  text?: string;
+  note?: string;
+  detail?: string;
+  id?: string;
+}
+
 /** One folder in the rail, with the conversations whose header records it. */
 export interface ProjectGroup {
   path: string;
@@ -180,6 +190,11 @@ export const api = {
     call<SessionInfo[]>(`/api/sessions?archived=${archived ? "true" : "false"}`),
 
   openSession: (path: string) => post<void>("/api/sessions/open", { path }),
+
+  // What the conversation in view holds. A switch has already happened by the
+  // time this is asked, so it names no session: the answer is always the one on
+  // screen, and a path parameter would let a stale row describe another one.
+  transcript: () => call<TranscriptBlock[]>("/api/sessions/transcript"),
 
   // A conversation starts where the last one ran unless a folder is named:
   // the primary button keeps the reader where they are, a project's own button

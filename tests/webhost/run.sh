@@ -7,19 +7,21 @@
 # reaches everything), so asserting it would say nothing at all.
 #
 # What is asserted instead is the shape of the adapter: it may name assembly,
-# httpapi, session, project and config, and nothing else of ours. A new direct
-# import of provider, tool or tui would mean this package had started doing work
-# the kernel already does, in a place the kernel's gates cannot see. The last
-# two are the exceptions that are worth naming: a project is a list of folders
-# kept beside the sessions rather than inside the kernel (session files already
-# carry their own folder, so the kernel has nothing to add), and config is the
-# leaf that answers where that list lives.
+# httpapi, session, project, transcript and config, and nothing else of ours. A
+# new direct import of provider, tool or tui would mean this package had started
+# doing work the kernel already does, in a place the kernel's gates cannot see.
+# The last three are the exceptions that are worth naming: a project is a list of
+# folders kept beside the sessions rather than inside the kernel (session files
+# already carry their own folder, so the kernel has nothing to add), transcript
+# is the kernel's fold and the replay of a past conversation has to go through it
+# rather than through a second opinion held here, and config is the leaf that
+# answers where that list lives.
 set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib.sh"
 cd "$TREE_ROOT"
 
 step "webhost: direct imports"
-allowed=(pi-go/internal/assembly pi-go/internal/config pi-go/internal/httpapi pi-go/internal/project pi-go/internal/session)
+allowed=(pi-go/internal/assembly pi-go/internal/config pi-go/internal/httpapi pi-go/internal/project pi-go/internal/session pi-go/internal/transcript)
 imports="$(go list -f '{{join .Imports "\n"}}' ./internal/webhost)"
 while IFS= read -r dep; do
 	[[ -z $dep ]] && continue

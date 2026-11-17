@@ -85,6 +85,7 @@ export default function App() {
       .catch(() => setNotice("无法读取服务状态"));
     void refreshSessions();
     void refreshModels();
+    void loadTranscript();
     return () => {
       live = false;
     };
@@ -129,7 +130,10 @@ export default function App() {
   const switchSession = async (path: string) => {
     try {
       await api.openSession(path);
-      setBlocks([]);
+      // The switch only moves the kernel; what the conversation holds comes
+      // from a second question. Without it the page went blank, which reads as
+      // "the history is gone" rather than "it has not been asked for yet".
+      setBlocks(fold.replay(await api.transcript()));
       setDraftDir("");
       await refreshSessions();
       setFacts(await api.state());
@@ -137,6 +141,16 @@ export default function App() {
       setNotice(cause instanceof Error ? cause.message : String(cause));
     }
   };
+
+  // The conversation the process was started with already has a file when the
+  // window is reopened, so the first paint reads it back too.
+  const loadTranscript = useCallback(async () => {
+    try {
+      setBlocks(fold.replay(await api.transcript()));
+    } catch {
+      setBlocks([]);
+    }
+  }, []);
 
   // A conversation starts where the last one ran unless a project's own button
   // named a folder; either way the page then re-reads the rail, because a new

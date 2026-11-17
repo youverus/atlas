@@ -33,6 +33,11 @@ type Host interface {
 	RestoreSession(path string) error
 	// DeleteSession removes the file.
 	DeleteSession(path string) error
+	// Transcript replays the conversation in view. Switching to a session
+	// that has a file and showing an empty page would look like the history
+	// was thrown away, so the window reads it back in the same shape the live
+	// stream produces.
+	Transcript() ([]TranscriptBlock, error)
 
 	// Projects lists the folders a window draws, each with its conversations.
 	// archived selects the other list, the same way Sessions does.
@@ -107,8 +112,23 @@ type SessionInfo struct {
 	Current      bool   `json:"current,omitempty"`
 }
 
-// ModelOption is one selectable model. Levels is empty for a model that does
-// not reason, which is what lets the picker hide the thinking control instead
+// TranscriptBlock is one drawn item of a replayed conversation. It mirrors
+// transcript.Block field for field, minus the bookkeeping a reader never sees,
+// so the page can render a past session with the components it already has.
+//
+// Role is the folded role name, not a number: an integer is a stable encoding
+// and a bad contract, because inserting a role in the middle of the enum would
+// silently rename every one after it.
+type TranscriptBlock struct {
+	Role   string `json:"role"`
+	Name   string `json:"name,omitempty"`
+	Text   string `json:"text,omitempty"`
+	Note   string `json:"note,omitempty"`
+	Detail string `json:"detail,omitempty"`
+	ID     string `json:"id,omitempty"`
+}
+
+// ModelOption is one selectable model. Levels is empty for a model that does// not reason, which is what lets the picker hide the thinking control instead
 // of offering a choice that would be rejected.
 type ModelOption struct {
 	Provider      string   `json:"provider"`
@@ -179,6 +199,7 @@ type FileContent struct {
 // -offline path use.
 func (s *Server) mountHost() {
 	s.mux.HandleFunc("GET /api/sessions", s.serveSessions)
+	s.mux.HandleFunc("GET /api/sessions/transcript", s.serveSessionTranscript)
 	s.mux.HandleFunc("POST /api/sessions/open", s.serveSessionOpen)
 	s.mux.HandleFunc("POST /api/sessions/new", s.serveSessionNew)
 	s.mux.HandleFunc("POST /api/sessions/archive", s.serveSessionArchive)
@@ -265,6 +286,27 @@ func (s *Server) serveSessionOpen(w http.ResponseWriter, r *http.Request) {
 	}
 	s.publishStatus(statusEvent{Running: s.running.Load()})
 	writeJSON(w, map[string]bool{"ok": true})
+}
+
+// serveSessionTranscript replays the conversation in view.
+//
+// It is a GET because it has no effect: the switch already happened through
+// /api/sessions/open, and this only reads what that switch made current. A
+// path parameter would invite reading a session the kernel never opened, and
+// the reply would then describe a conversation that is not the one on screen.
+func (s *Server) serveSessionTranscript(w http.ResponseWriter, r *http.Request) {
+	if !s.needHost(w) {
+		return
+	}
+	blocks, err := s.host.Transcript()
+	if err != nil {
+		fail(w, err, http.StatusConflict)
+		return
+	}
+	if blocks == nil {
+		blocks = []TranscriptBlock{}
+	}
+	writeJSON(w, blocks)
 }
 
 // newSessionRequest is the body of /api/sessions/new. Cwd is optional: the

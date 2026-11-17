@@ -357,8 +357,9 @@ func TestServeReportsState(t *testing.T) {
 	if state.Model.ID != "faux-1" || state.Model.Provider != "faux" {
 		t.Fatalf("model = %+v, want the configured one", state.Model)
 	}
-	if state.ThinkingLevel != "off" {
-		t.Fatalf("thinking level = %q, want off", state.ThinkingLevel)
+	// A session with no recorded change starts on the default gear, not off.
+	if state.ThinkingLevel != "medium" {
+		t.Fatalf("thinking level = %q, want the default gear", state.ThinkingLevel)
 	}
 	if state.IsStreaming || state.IsCompacting {
 		t.Fatalf("streaming/compacting = %v/%v, want both false", state.IsStreaming, state.IsCompacting)
@@ -882,7 +883,11 @@ func TestServeReportsNothingToCycle(t *testing.T) {
 		t.Fatalf("data = %v, want an explicit null", value)
 	}
 
-	// The axis still cycles where there is one.
+	// The axis still cycles where there is one. Pin the start: a fresh session
+	// begins on the default gear, which this model's axis does not carry, and
+	// this test is about the walk to the next entry.
+	h.sendJSON(map[string]any{"type": "set_thinking_level", "level": "off"})
+	h.success("set_thinking_level")
 	h.send(`{"type":"cycle_thinking_level"}`)
 	var cycle struct {
 		Level string `json:"level"`

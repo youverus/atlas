@@ -124,9 +124,16 @@ func (h *Host) Models() (httpapi.ModelList, error) {
 	options := h.kernel.App.Models()
 	current := h.kernel.App.Model()
 	levels, _ := h.kernel.App.AvailableThinkingLevels()
+	// A model with no reasoning axis has no level to report. Saying "medium"
+	// beside a name with no control to change it would be a setting the reader
+	// cannot act on, and the adapters send nothing for such a model anyway.
+	thinking := ""
+	if len(levels) > 0 {
+		thinking = h.kernel.App.ThinkingLevel()
+	}
 	list := httpapi.ModelList{
 		Current:  current.Provider + "/" + current.ID,
-		Thinking: h.kernel.App.ThinkingLevel(),
+		Thinking: thinking,
 		Levels:   levels,
 		Models:   make([]httpapi.ModelOption, 0, len(options)),
 	}

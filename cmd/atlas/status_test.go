@@ -87,8 +87,11 @@ func TestStatusLineTracksALevelSetAfterStartup(t *testing.T) {
 	}
 	bar := newStatusBar(application, nil, "/tmp/project", "fs+bash")
 
-	if got := bar.line(200); strings.Contains(got, "think ") {
-		t.Fatalf("fresh line = %q, want no level while the level is off", got)
+	// A fresh session now starts on the default gear rather than off, so the
+	// bar names it from the first frame: a level the reader never chose but the
+	// model does use has to be visible, or the thinking is invisible cost.
+	if got := bar.line(200); !strings.Contains(got, "| think medium |") {
+		t.Fatalf("fresh line = %q, want the default level", got)
 	}
 	if err := application.SetThinkingLevel("high"); err != nil {
 		t.Fatalf("set level: %v", err)

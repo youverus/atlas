@@ -518,7 +518,7 @@ func TestModelsAndThinkingLevelsComeFromTheTable(t *testing.T) {
 	if fitted != "high" || adjustment == "" {
 		t.Fatalf("fitted = %q adjustment = %q, want the top gear and a reason", fitted, adjustment)
 	}
-	if application.ThinkingLevel() != session.DefaultThinkingLevel {
+	if application.ThinkingLevel() != "high" {
 		t.Fatalf("level = %q, want fitting to change nothing", application.ThinkingLevel())
 	}
 
@@ -553,8 +553,8 @@ func TestCycleModelCarriesTheThinkingLevel(t *testing.T) {
 	}
 	// m-2 cannot think, so the level follows the model down rather than
 	// staying on a gear the next request would drop.
-	if cycle.ThinkingLevel != session.DefaultThinkingLevel || application.ThinkingLevel() != session.DefaultThinkingLevel {
-		t.Fatalf("level = %q / %q, want %q", cycle.ThinkingLevel, application.ThinkingLevel(), session.DefaultThinkingLevel)
+	if cycle.ThinkingLevel != "off" || application.ThinkingLevel() != "off" {
+		t.Fatalf("level = %q / %q, want off", cycle.ThinkingLevel, application.ThinkingLevel())
 	}
 
 	cycle, ok, err = application.CycleModel()
@@ -584,7 +584,12 @@ func TestCycleThinkingLevelWalksTheDeclaredAxis(t *testing.T) {
 		cfg.Resolver = serveAll(prov)
 	})
 
-	// New starts at off, so the first cycle lands on the next gear.
+	// Pin the starting level: this test is about the walk, not about where a
+	// fresh session begins. Off is the first gear of the declared axis, so the
+	// first cycle lands on the next one.
+	if err := application.SetThinkingLevel("off"); err != nil {
+		t.Fatalf("set off: %v", err)
+	}
 	level, ok, err := application.CycleThinkingLevel()
 	if err != nil || !ok || level != "low" {
 		t.Fatalf("level = %q ok = %v err = %v, want low", level, ok, err)

@@ -9,7 +9,7 @@
 // Blocks are updated in place by id rather than rebuilt, so a streaming answer
 // appends to the last block instead of re-rendering the transcript.
 
-import type { AgentEvent } from "../api";
+import type { AgentEvent, TranscriptBlock } from "../api";
 
 export type Role = "user" | "answer" | "thinking" | "tool" | "notice" | "error";
 
@@ -202,3 +202,27 @@ export function prompt(blocks: Block[], text: string): Block[] {
 export function settle(blocks: Block[]): Block[] {
   return closeOpen(blocks);
 }
+
+/**
+ * replay rebuilds the view of a conversation that already happened.
+ *
+ * The roles and the call/result pairing are decided on the server, by the same
+ * fold the terminal uses: a window that re-derived them from the wire form
+ * would be a second opinion on what counts as one tool call. This only gives
+ * each item the local id the renderer keys on.
+ */
+export function replay(items: TranscriptBlock[]): Block[] {
+  return items.map((item) => {
+    const role = (ROLES.has(item.role) ? item.role : "notice") as Role;
+    return blank(role, {
+      name: item.name,
+      text: item.text ?? "",
+      note: item.note,
+      detail: item.detail,
+      callId: item.id,
+      error: role === "error" || (role === "tool" && item.note?.includes("failed") === true),
+    });
+  });
+}
+
+const ROLES = new Set<string>(["user", "answer", "thinking", "tool", "notice", "error"]);

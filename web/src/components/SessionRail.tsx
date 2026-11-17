@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { ProjectGroup, SessionInfo } from "../api";
 
 // The session rail.
@@ -50,6 +50,32 @@ export function SessionRail({
   const [projectMenu, setProjectMenu] = useState<string | null>(null);
   const [asking, setAsking] = useState(false);
   const [draft, setDraft] = useState("");
+
+  // A menu is dismissed by walking away from it, not by finding the same small
+  // target again. The listener is captured so it runs before the row's own
+  // click: closing first is what keeps "open the row" and "close the menu" from
+  // fighting over one event, and a click inside the menu or on the toggle is
+  // left to the handlers that already own it.
+  useEffect(() => {
+    if (!menu && !projectMenu) return;
+    const dismiss = (event: Event) => {
+      const target = event.target as HTMLElement | null;
+      if (target?.closest(".menu, .session-row__more, .project-group__action")) return;
+      setMenu(null);
+      setProjectMenu(null);
+    };
+    const escape = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      setMenu(null);
+      setProjectMenu(null);
+    };
+    document.addEventListener("pointerdown", dismiss, true);
+    document.addEventListener("keydown", escape);
+    return () => {
+      document.removeEventListener("pointerdown", dismiss, true);
+      document.removeEventListener("keydown", escape);
+    };
+  }, [menu, projectMenu]);
 
   const pickProject = async () => {
     setMenu(null);

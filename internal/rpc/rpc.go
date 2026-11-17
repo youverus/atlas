@@ -227,9 +227,9 @@ func (s *Server) handle(ctx context.Context, cmd command) error {
 		case !known:
 			levels = append([]string(nil), thinkingLevels...)
 		case len(levels) == 0:
-			// A model that cannot think has exactly one sendable level, which
-			// is also what pi reports for it.
-			levels = []string{session.DefaultThinkingLevel}
+			// A model that cannot think has exactly one sendable level: the
+			// switch, not the default gear a thinking model starts on.
+			levels = []string{"off"}
 		}
 		return s.success(cmd.ID, cmd.Type, thinkingLevelsResult{Levels: levels})
 	case "cycle_thinking_level":

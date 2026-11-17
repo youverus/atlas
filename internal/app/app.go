@@ -306,6 +306,19 @@ func New(cfg Config, manager *session.Manager) (*App, error) {
 	if a.thinking == "" {
 		a.thinking = session.DefaultThinkingLevel
 	}
+	// The default is a gear, so it has to be one this model can express. A row
+	// that declares off/low/high has no medium, and sending a level the picker
+	// never offered would leave the reader with a setting they cannot see. A
+	// model with no reasoning axis falls back to off, which is the only thing it
+	// can be told; a configured level is left alone, because it is the reader's
+	// answer and the CLI already reported a mismatch.
+	if a.thinking == session.DefaultThinkingLevel && cfg.FitThinking != nil {
+		fitted, _, err := cfg.FitThinking(a.model, a.thinking)
+		if err != nil || fitted == "" {
+			fitted = "off"
+		}
+		a.thinking = fitted
+	}
 	if cfg.Compaction != nil {
 		a.compaction = *cfg.Compaction
 	}
@@ -334,6 +347,10 @@ func New(cfg Config, manager *session.Manager) (*App, error) {
 	hasConversation := len(projected.Messages) > 0
 	a.adoptThinkingLevel(manager.BuildContextEntries(), projected.ThinkingLevel)
 	a.adoptModel(projected.Model, hasConversation)
+	// The recorded level and the model both settled above, and a level only
+	// exists on the axis of the model in effect: a session carried over from a
+	// model that thought to one that cannot has to land on the switch.
+	a.thinking = a.fitLevel(a.model, a.thinking)
 	a.adoptSystemPrompt(projected.Messages)
 
 	a.ag = a.buildAgent(a.systemPrompt, &a.steering, &a.followUps)
@@ -353,6 +370,25 @@ func (a *App) adoptThinkingLevel(branch []session.Entry, recorded string) {
 			return
 		}
 	}
+}
+
+// fitLevel rounds a level onto the axis of the model in effect. A model that
+// cannot think has exactly one answer, and an axis that does not carry the
+// level rounds it rather than keeping a gear the next request would drop.
+func (a *App) fitLevel(model wire.Model, level string) string {
+	if a.fitThinking == nil {
+		// Without the hook there is nothing to compare against, and inventing
+		// an answer would overrule a level the reader asked for.
+		return level
+	}
+	fitted, _, err := a.fitThinking(model, level)
+	if err != nil || fitted == "" {
+		// A hook that refuses this model leaves the switch: it is the only
+		// level every model can be told, and the alternative is a level no
+		// request can carry.
+		return "off"
+	}
+	return fitted
 }
 
 // adoptModel prefers the model the session recorded, which is what pi restores
@@ -684,6 +720,10 @@ func (a *App) SetModel(providerName, modelID string) (wire.Model, error) {
 	a.model = model
 	a.provider = streamer
 	a.restoreNote = ""
+	// A level only exists on the axis of the model in effect. Switching to a
+	// model that cannot think has to turn thinking off, or the session keeps
+	// reporting a gear the new model has no way to send.
+	a.thinking = a.fitLevel(model, a.thinking)
 	a.rebuild()
 	return model, nil
 }
@@ -780,9 +820,10 @@ func (a *App) CycleModel() (ModelCycle, bool, error) {
 	level := a.thinking
 	a.mu.Unlock()
 	if levels, known := a.AvailableThinkingLevels(); known && len(levels) == 0 {
-		// A model that cannot think has exactly one sendable level, and pi
-		// lands there too rather than leaving a gear the request will drop.
-		level = session.DefaultThinkingLevel
+		// A model that cannot think has exactly one sendable level. It is not
+		// the default gear — that is where a thinking model starts — it is the
+		// switch, because a gear here would name a request the turn drops.
+		level = "off"
 	} else if fitted, _, fitErr := a.FitThinking(level); fitErr == nil {
 		level = fitted
 	}

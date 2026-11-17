@@ -19,8 +19,15 @@ const (
 )
 
 // DefaultThinkingLevel is what a session without a thinking_level_change entry
-// reports. pi uses "off".
-const DefaultThinkingLevel = "off"
+// reports.
+//
+// It is a gear rather than "off", which is where pi starts. A reasoning model
+// that answers without reasoning is a failure the reader notices only by
+// distrusting the answer, and the default is the only setting most turns ever
+// see: an agent that has to be told to think looks like one that cannot. A
+// model that declares no reasoning ignores this, because the adapters send no
+// thinking configuration for it, and "off" stays one selection away everywhere.
+const DefaultThinkingLevel = "medium"
 
 // ModelRef identifies the model in effect at the end of the active branch.
 type ModelRef struct {
