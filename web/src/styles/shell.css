@@ -1,0 +1,488 @@
+/* Shell: the frame the window is made of. Layout only — every colour, radius
+   and step comes from tokens.css so the two never drift apart. */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+/* The frame owns the viewport: a document-level scrollbar would take width off
+   the shell and put a gap between the rail and the window edge. Everything that
+   can overflow scrolls inside its own pane instead. */
+html,
+body {
+  overflow: hidden;
+}
+
+body {
+  margin: 0;
+  font-family: var(--font-sans);
+  font-size: var(--text-body-lg);
+  line-height: 1.55;
+  background: var(--fx-surface-canvas);
+  color: var(--fx-text-body);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+button,
+input,
+textarea,
+select {
+  font: inherit;
+  color: inherit;
+}
+
+button {
+  cursor: pointer;
+  border: none;
+  background: none;
+  padding: 0;
+}
+
+button:disabled {
+  cursor: default;
+}
+
+::selection {
+  background: var(--fx-accent-blue-selection);
+}
+
+/* The window is one rounded card floating on the canvas, which is what makes a
+   desktop app read as a desktop app rather than as a web page in a frame. */
+.app {
+  display: grid;
+  grid-template-columns: 264px minmax(0, 1fr);
+  /* An implicit auto row would grow past the viewport whenever the chat column
+     asks for more height than the window has, and the overflow then stretches
+     the whole shell. Pinning the row to the container keeps the transcript the
+     only thing that scrolls. */
+  grid-template-rows: minmax(0, 1fr);
+  height: 100%;
+  background: var(--fx-surface-main);
+}
+
+.app[data-rail="collapsed"] {
+  grid-template-columns: 0 minmax(0, 1fr);
+}
+
+/* ---------- sidebar ---------- */
+
+.rail {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  overflow: hidden;
+  background: var(--fx-surface-sidebar);
+  border-right: 1px solid var(--fx-line-default);
+}
+
+.rail__head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-4) var(--space-3) var(--space-3);
+}
+
+.rail__brand {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+  font-size: var(--text-body-lg);
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--fx-text-primary);
+}
+
+.rail__mark {
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  border-radius: var(--radius-icon-box);
+  background: var(--fx-surface-inverse);
+  color: var(--fx-text-inverse);
+  font-size: var(--text-meta);
+  font-weight: 700;
+  letter-spacing: 0;
+  flex: none;
+}
+
+.rail__spacer {
+  flex: 1;
+}
+
+.icon-button {
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border-radius: var(--radius-chip);
+  color: var(--fx-text-secondary);
+}
+
+.icon-button:hover {
+  background: var(--fx-surface-hover-overlay);
+  color: var(--fx-text-primary);
+}
+
+.icon-button[aria-pressed="true"] {
+  background: var(--fx-surface-selected);
+  color: var(--fx-text-primary);
+}
+
+.rail__actions {
+  padding: 0 var(--space-2) var(--space-2);
+}
+
+.button-primary {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-1-5);
+  width: 100%;
+  height: 32px;
+  padding: 0 var(--space-3);
+  border-radius: var(--radius-control);
+  background: var(--fx-surface-inverse);
+  color: var(--fx-text-inverse);
+  font-size: var(--text-body);
+  font-weight: 500;
+  box-shadow: var(--shadow-control);
+}
+
+.button-primary:hover {
+  background: var(--fx-surface-inverse-hover);
+}
+
+.button-primary:disabled {
+  opacity: 0.45;
+}
+
+.rail__scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 0 var(--space-2) var(--space-3);
+}
+
+.rail__label {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--space-2) var(--space-2) var(--space-1);
+  font-size: var(--text-meta);
+  font-weight: 500;
+  color: var(--fx-text-tertiary);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.rail__empty {
+  padding: var(--space-2);
+  font-size: var(--text-label);
+  color: var(--fx-text-tertiary);
+}
+
+.rail__foot {
+  padding: var(--space-2);
+  border-top: 1px solid var(--fx-line-default);
+}
+
+/* The footer carries the build and the workspace, not an empty state: it shares
+   the muted step but not the padding the empty state puts around itself. */
+.rail__meta {
+  font-size: var(--text-label);
+  color: var(--fx-text-tertiary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ---------- project group ---------- */
+
+/* One section per project. The head is a band rather than a row of the list:
+   it names a folder, it is not something to be read as a conversation. */
+.project-group {
+  margin-bottom: var(--space-2);
+}
+
+.project-group__head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1-5);
+  height: 26px;
+  padding: 0 var(--space-1) 0 var(--space-2);
+  color: var(--fx-text-secondary);
+}
+
+.project-group__name {
+  min-width: 0;
+  overflow: hidden;
+  font-size: var(--text-label);
+  font-weight: 600;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.project-group__tag {
+  flex: none;
+  padding: 1px var(--space-1-5);
+  border-radius: var(--radius-xs);
+  background: var(--fx-surface-inset);
+  font-size: var(--text-micro);
+  color: var(--fx-text-tertiary);
+}
+
+.project-group__tag[data-warn="true"] {
+  color: var(--fx-status-warning-text);
+}
+
+.project-group__action {
+  flex: none;
+  width: 20px;
+  height: 20px;
+  opacity: 0;
+}
+
+.project-group:hover .project-group__action,
+.project-group__action:focus-visible {
+  opacity: 1;
+}
+
+.project-group__empty {
+  padding: var(--space-1) var(--space-2) var(--space-1);
+  font-size: var(--text-label);
+  color: var(--fx-text-tertiary);
+}
+
+/* A row and its popover share one positioning context, so the menu opens over
+   the row it belongs to instead of over the list. */
+.session-row__slot {
+  position: relative;
+}
+
+/* The add-project row is the last line of the list, where a list the reader
+   builds grows. It is a row of that list, not a toolbar button. */
+.rail__add-project {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1-5);
+  width: 100%;
+  height: 28px;
+  margin-top: var(--space-1);
+  padding: 0 var(--space-2);
+  border-radius: var(--radius-row);
+  color: var(--fx-text-tertiary);
+  font-size: var(--text-label);
+  text-align: left;
+}
+
+.rail__add-project:hover {
+  background: var(--fx-surface-hover-overlay);
+  color: var(--fx-text-body);
+}
+
+.rail__path-form {
+  display: flex;
+  gap: var(--space-1-5);
+  margin-top: var(--space-1);
+  padding: 0 var(--space-1);
+}
+
+.rail__path-input {
+  flex: 1;
+  min-width: 0;
+  height: 26px;
+  padding: 0 var(--space-2);
+  border: 1px solid var(--fx-line-default);
+  border-radius: var(--radius-xs);
+  background: var(--fx-surface-raised);
+  color: var(--fx-text-primary);
+  font-size: var(--text-label);
+}
+
+/* ---------- session row ---------- */
+
+.session-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  width: 100%;
+  padding: var(--space-1-5) var(--space-2);
+  border-radius: var(--radius-row);
+  text-align: left;
+  color: var(--fx-text-body);
+}
+
+.session-row:hover {
+  background: var(--fx-surface-hover-overlay);
+}
+
+.session-row[data-current="true"] {
+  background: var(--fx-surface-selected);
+  color: var(--fx-text-primary);
+}
+
+/* The row a brand-new conversation will occupy: it is already the one in view,
+   so it is not a target — no pointer, no hover. */
+.session-row--pending {
+  cursor: default;
+}
+
+.session-row--pending .session-row__meta {
+  color: var(--fx-text-tertiary);
+}
+
+/* The row's text is two spans inside a button. A span is inline by default and
+   an inline box takes no overflow: the title and the meta would share one line
+   and run past the row instead of ending in an ellipsis. A column body gives
+   each its own line and a width to be clipped to. */
+.session-row__body {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  flex: 1;
+}
+
+.session-row__title {
+  display: block;
+  overflow: hidden;
+  font-size: var(--text-body);
+  line-height: 1.35;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.session-row__meta {
+  display: block;
+  overflow: hidden;
+  font-size: var(--text-micro);
+  color: var(--fx-text-tertiary);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.session-row__more {
+  flex: none;
+  width: 20px;
+  height: 20px;
+  border-radius: var(--radius-xs);
+  color: var(--fx-text-tertiary);
+  opacity: 0;
+}
+
+.session-row:hover .session-row__more,
+.session-row__more:focus-visible {
+  opacity: 1;
+}
+
+.session-row__more:hover {
+  background: var(--fx-surface-hover-overlay-strong);
+  color: var(--fx-text-primary);
+}
+
+/* ---------- main column ---------- */
+
+.main {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  background: var(--fx-surface-main);
+}
+
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  height: 44px;
+  padding: 0 var(--space-3);
+  border-bottom: 1px solid var(--fx-line-default);
+  flex: none;
+}
+
+.topbar__title {
+  min-width: 0;
+  overflow: hidden;
+  font-size: var(--text-body);
+  font-weight: 500;
+  color: var(--fx-text-primary);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.topbar__facts {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1-5);
+  margin-left: auto;
+  font-size: var(--text-meta);
+  color: var(--fx-text-tertiary);
+  white-space: nowrap;
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  height: 22px;
+  padding: 0 var(--space-2);
+  border-radius: var(--radius-chip);
+  background: var(--fx-surface-inset);
+  box-shadow: var(--shadow-hairline);
+  font-size: var(--text-meta);
+  color: var(--fx-text-secondary);
+  white-space: nowrap;
+}
+
+.chip--button:hover {
+  background: var(--fx-surface-raised-hover);
+  color: var(--fx-text-primary);
+}
+
+.chip--accent {
+  background: var(--fx-accent-blue-soft);
+  color: var(--fx-accent-blue-text);
+  box-shadow: none;
+}
+
+.dot {
+  width: 6px;
+  height: 6px;
+  border-radius: var(--radius-pill);
+  background: var(--fx-status-success);
+  flex: none;
+}
+
+.dot--off {
+  background: var(--fx-text-faint);
+}
+
+.dot--warn {
+  background: var(--fx-status-warning);
+}
+
+@media (max-width: 720px) {
+  .app {
+    grid-template-columns: 0 minmax(0, 1fr);
+  }
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}

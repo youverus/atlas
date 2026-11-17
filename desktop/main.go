@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -28,13 +29,18 @@ import (
 
 	"pi-go/internal/assembly"
 	"pi-go/internal/httpapi"
+	"pi-go/internal/webhost"
 	"pi-go/internal/wire"
 )
 
 // version is printed on the page. It tracks the kernel's own version loosely:
 // this shell ships separately and does not need to be rebuilt when the model
 // adapters change.
-const version = "0.2.0"
+//
+// It is a var, not a const, so scripts/package.sh can stamp the release version
+// with -ldflags -X main.version=... and have the page, the facts and the app
+// bundle's Info.plist agree; -X cannot write to a const.
+var version = "0.2.0"
 
 func main() {
 	configPath := flag.String("config", "", "config file (default ~/.atlas/config.json)")
@@ -48,9 +54,37 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	// A bundle started by Finder or by `open` inherits "/" as its working
+	// directory, so the window would label itself with a bare slash and run
+	// every tool at the filesystem root — read, bash and the file drawer's
+	// confine all take their root from here. A window has no shell to cd in,
+	// so a root cwd falls back to home; -cwd still wins when given.
 	directory, _ := os.Getwd()
+	if *workdir == "" && filepath.Clean(directory) == "/" {
+		if home, err := os.UserHomeDir(); err == nil {
+			*workdir = home
+		}
+	}
+	if *workdir != "" {
+		if resolved, err := assembly.ResolveDir(*workdir); err == nil {
+			directory = resolved
+		}
+	}
 	shown := "offline"
 	var turn httpapi.Turn
+	var host httpapi.Host
+
+	// server is written once, below, and read by the Ask closure from a tool
+	// goroutine mid-turn. The closure is the only way to break the cycle:
+	// the gate needs somewhere to post a question, and the server needs the
+	// turn the gate is part of. Nothing can ask before the first turn runs, so
+	// the assignment below always happens first.
+	var server *httpapi.Server
+	ask := func(question assembly.Ask) assembly.Answer {
+		decision := server.Ask(httpapi.Question{Subject: question.Subject, Tool: question.Tool})
+		return assembly.Answer{Allowed: decision.Allowed, Always: decision.Always}
+	}
+	var chooser folderPicker
 
 	if *offline {
 		turn = offlineTurn()
@@ -62,6 +96,7 @@ func main() {
 			Workdir:        *workdir,
 			PermissionMode: *permission,
 			Version:        version,
+			Ask:            ask,
 		})
 		if err != nil {
 			// No config, no key, no network: the window would open onto nothing
@@ -75,10 +110,17 @@ func main() {
 		}
 		directory, shown = kernel.Cwd, kernel.Selection.Name()
 		turn = kernelTurn(kernel)
+		host = webhost.New(kernel)
 	}
 
-	server := httpapi.New(httpapi.Options{
+	server = httpapi.New(httpapi.Options{
 		Turn: turn,
+		Host: host,
+		// The chooser needs the application, which is created below because
+		// the window has to open the server's own URL. The struct is written
+		// once the application exists and read only after a page asks for it,
+		// the same order the approval closure above relies on.
+		Picker: &chooser,
 		Facts: httpapi.Facts{
 			Version:   version,
 			Directory: directory,
@@ -98,6 +140,7 @@ func main() {
 			ApplicationShouldTerminateAfterLastWindowClosed: true,
 		},
 	})
+	chooser.app = app
 
 	app.Window.NewWithOptions(application.WebviewWindowOptions{
 		Name:   "main",

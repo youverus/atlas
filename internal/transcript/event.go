@@ -1,4 +1,4 @@
-package tui
+package transcript
 
 import (
 	"strings"
@@ -9,13 +9,13 @@ import (
 
 // Apply folds one agent event into the transcript. It is the whole of the
 // interface's knowledge about the event protocol: everything above it deals in
-// blocks.
+// blocks, and no frontend needs to know which events exist.
 //
-// The event stream is the same one the inline renderer consumes, so the shapes
-// match by construction: an answer is text deltas until the message ends, a
-// thinking block is the reasoning before it, and a tool call is a start and an
-// end with a call id between them — plus any number of progress updates riding
-// between those two, which rewrite the running call's tail.
+// The event stream is the same one every renderer consumes, so the shapes match
+// by construction: an answer is text deltas until the message ends, a thinking
+// block is the reasoning before it, and a tool call is a start and an end with
+// a call id between them — plus any number of progress updates riding between
+// those two, which rewrite the running call's tail.
 func (t *Transcript) Apply(event wire.AgentEvent) {
 	switch event.Type {
 	case wire.AgentEventMessageStart:
@@ -154,11 +154,11 @@ func (t *Transcript) startTool(event wire.AgentEvent) {
 	})
 }
 
-// progressEvery is how often a running call may rewrite its tail. A server
+// ProgressEvery is how often a running call may rewrite its tail. A server
 // picks its own reporting rate, and some pick one that would repaint faster
 // than the eye can read: a quarter second is fast enough to look live and slow
 // enough that the number is legible between paints.
-const progressEvery = 250 * time.Millisecond
+const ProgressEvery = 250 * time.Millisecond
 
 // updateTool moves a running call's progress onto its line. The tail is
 // replaced, never appended: the reader needs to know the call is alive, and a
@@ -180,7 +180,7 @@ func (t *Transcript) updateTool(event wire.AgentEvent) {
 		return
 	}
 	now := t.clock()
-	if !block.progressAt.IsZero() && now.Sub(block.progressAt) < progressEvery {
+	if !block.progressAt.IsZero() && now.Sub(block.progressAt) < ProgressEvery {
 		return
 	}
 	block.Progress = text
@@ -249,38 +249,4 @@ func (t *Transcript) closeRole(role Role, label string) {
 	if i, ok := t.openBlockOf(role); ok {
 		t.Close(i, label)
 	}
-}
-
-func joinNote(note, addition string) string {
-	switch {
-	case note == "":
-		return addition
-	case addition == "":
-		return note
-	}
-	return note + " · " + addition
-}
-
-// withoutNote removes one part of a joined note.
-func withoutNote(note, part string) string {
-	if note == "" {
-		return ""
-	}
-	parts := strings.Split(note, " · ")
-	out := parts[:0]
-	for _, value := range parts {
-		if value != part {
-			out = append(out, value)
-		}
-	}
-	return strings.Join(out, " · ")
-}
-
-func firstNonEmpty(values ...string) string {
-	for _, value := range values {
-		if value != "" {
-			return value
-		}
-	}
-	return ""
 }

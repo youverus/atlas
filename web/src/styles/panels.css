@@ -1,0 +1,305 @@
+/* Side panels: the file drawer takes its own grid column, so opening it narrows
+   the transcript instead of covering it (the reading column is fluid below its
+   max width, so it does re-measure when the window cannot hold both). The
+   settings sheet floats over everything on a scrim. Both read the same tokens as
+   the rest of the window. */
+
+.workspace {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  flex: 1;
+  min-height: 0;
+}
+
+.workspace[data-drawer="open"] {
+  grid-template-columns: minmax(0, 1fr) 320px;
+}
+
+.drawer {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  overflow: hidden;
+  border-left: 1px solid var(--fx-line-default);
+  background: var(--fx-surface-card);
+}
+
+.drawer__head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  height: 36px;
+  padding: 0 var(--space-2) 0 var(--space-3);
+  border-bottom: 1px solid var(--fx-line-default);
+  flex: none;
+}
+
+.drawer__title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  font-size: var(--text-label);
+  font-weight: 500;
+  color: var(--fx-text-primary);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.drawer__scroll {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: var(--space-1-5);
+}
+
+.drawer__foot {
+  flex: none;
+  padding: var(--space-1-5) var(--space-2);
+  border-top: 1px solid var(--fx-line-default);
+  font-size: var(--text-micro);
+  color: var(--fx-text-tertiary);
+}
+
+.file-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  width: 100%;
+  padding: 3px var(--space-1-5);
+  border-radius: var(--radius-row);
+  font-size: var(--text-label);
+  color: var(--fx-text-body);
+  text-align: left;
+}
+
+.file-row:hover {
+  background: var(--fx-surface-hover-overlay);
+}
+
+.file-row[data-selected="true"] {
+  background: var(--fx-surface-selected);
+  color: var(--fx-text-primary);
+}
+
+.file-row__name {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.file-row__size {
+  margin-left: auto;
+  flex: none;
+  font-family: var(--font-mono);
+  font-size: var(--text-micro);
+  color: var(--fx-text-faint);
+}
+
+.file-row__glyph {
+  flex: none;
+  width: 14px;
+  text-align: center;
+  color: var(--fx-text-tertiary);
+  font-size: var(--text-micro);
+}
+
+.file-view {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  height: 100%;
+}
+
+.file-view__bar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-1-5) var(--space-2);
+  border-bottom: 1px solid var(--fx-line-subtle);
+  font-size: var(--text-micro);
+  color: var(--fx-text-tertiary);
+}
+
+.file-view__code {
+  flex: 1;
+  min-height: 0;
+  margin: 0;
+  padding: var(--space-2) var(--space-3);
+  overflow: auto;
+  font-family: var(--font-mono);
+  font-size: var(--text-micro);
+  line-height: 1.6;
+  color: var(--fx-text-body);
+  tab-size: 2;
+}
+
+/* ---------- settings sheet ---------- */
+
+.sheet-backdrop {
+  position: fixed;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: var(--space-6);
+  background: var(--fx-surface-scrim);
+  z-index: 20;
+}
+
+.sheet {
+  display: flex;
+  flex-direction: column;
+  width: min(560px, 100%);
+  max-height: min(640px, 88vh);
+  overflow: hidden;
+  border-radius: var(--radius-dialog);
+  background: var(--fx-surface-raised);
+  box-shadow: var(--shadow-dialog);
+}
+
+.sheet__head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-4);
+  border-bottom: 1px solid var(--fx-line-default);
+  flex: none;
+}
+
+.sheet__title {
+  flex: 1;
+  font-size: var(--text-body-lg);
+  font-weight: 600;
+  color: var(--fx-text-primary);
+}
+
+.sheet__body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--space-3) var(--space-4) var(--space-4);
+}
+
+.field {
+  margin-bottom: var(--space-4);
+}
+
+.field__label {
+  margin-bottom: var(--space-1-5);
+  font-size: var(--text-label);
+  font-weight: 500;
+  color: var(--fx-text-secondary);
+}
+
+.field__hint {
+  margin-top: var(--space-1);
+  font-size: var(--text-micro);
+  color: var(--fx-text-tertiary);
+}
+
+.select {
+  width: 100%;
+  height: 30px;
+  padding: 0 var(--space-2);
+  border: 1px solid var(--fx-line-strong);
+  border-radius: var(--radius-control);
+  background: var(--fx-surface-main);
+  font-size: var(--text-label);
+  color: var(--fx-text-primary);
+}
+
+.segmented {
+  display: inline-flex;
+  gap: 2px;
+  padding: 2px;
+  border-radius: var(--radius-segmented);
+  background: var(--fx-surface-inset);
+  box-shadow: var(--shadow-hairline);
+}
+
+.segmented button {
+  padding: 0 var(--space-2-5);
+  height: 24px;
+  border-radius: var(--radius-segment);
+  font-size: var(--text-label);
+  color: var(--fx-text-secondary);
+}
+
+.segmented button[aria-pressed="true"] {
+  background: var(--fx-surface-raised);
+  color: var(--fx-text-primary);
+  box-shadow: var(--shadow-control);
+}
+
+.stat-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-2);
+}
+
+.stat {
+  padding: var(--space-2) var(--space-2-5);
+  border-radius: var(--radius-chip);
+  background: var(--fx-surface-inset);
+}
+
+.stat__label {
+  font-size: var(--text-micro);
+  color: var(--fx-text-tertiary);
+}
+
+.stat__value {
+  font-family: var(--font-mono);
+  font-size: var(--text-body);
+  color: var(--fx-text-primary);
+}
+
+.meter {
+  height: 4px;
+  margin-top: var(--space-1-5);
+  border-radius: var(--radius-bar);
+  background: var(--fx-surface-track);
+  overflow: hidden;
+}
+
+.meter__fill {
+  height: 100%;
+  background: var(--fx-accent-blue);
+  transition: width 200ms ease;
+}
+
+/* ---------- menu ---------- */
+
+.menu {
+  position: absolute;
+  z-index: 30;
+  min-width: 160px;
+  padding: var(--space-1);
+  border-radius: var(--radius-menu);
+  background: var(--fx-surface-raised);
+  box-shadow: var(--shadow-menu);
+}
+
+.menu button {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  padding: var(--space-1-5) var(--space-2);
+  border-radius: var(--radius-menu-row);
+  font-size: var(--text-label);
+  color: var(--fx-text-body);
+  text-align: left;
+}
+
+.menu button:hover {
+  background: var(--fx-surface-hover-overlay);
+}
+
+.menu button[data-danger="true"] {
+  color: var(--fx-status-danger-text);
+}
+
+.menu__seam {
+  height: 1px;
+  margin: var(--space-1) 0;
+  background: var(--fx-line-default);
+}

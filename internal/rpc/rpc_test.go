@@ -962,17 +962,26 @@ func TestServeEntriesAndTree(t *testing.T) {
 		LeafID  *string         `json:"leafId"`
 	}
 	h.success("get_entries").data(t, &entries)
-	if len(entries.Entries) != 2 {
-		t.Fatalf("entries = %d, want the prompt and the answer", len(entries.Entries))
+	// The session names itself before the first message, so the name is the
+	// root of the tree and the prompt hangs from it.
+	wantTypes := []string{session.TypeSessionInfo, session.TypeMessage, session.TypeMessage}
+	if len(entries.Entries) != len(wantTypes) {
+		t.Fatalf("entries = %d, want the name, the prompt and the answer", len(entries.Entries))
 	}
-	if entries.LeafID == nil || *entries.LeafID != entries.Entries[1].ID {
-		t.Fatalf("leaf = %v, want %q", entries.LeafID, entries.Entries[1].ID)
+	for i, want := range wantTypes {
+		if got := entries.Entries[i].Type; got != want {
+			t.Fatalf("entry %d = %q, want %q", i, got, want)
+		}
+	}
+	answer := entries.Entries[2].ID
+	if entries.LeafID == nil || *entries.LeafID != answer {
+		t.Fatalf("leaf = %v, want %q", entries.LeafID, answer)
 	}
 
 	h.sendJSON(map[string]any{"type": "get_entries", "since": entries.Entries[0].ID})
 	h.success("get_entries").data(t, &entries)
-	if len(entries.Entries) != 1 {
-		t.Fatalf("entries after the first = %d, want 1", len(entries.Entries))
+	if len(entries.Entries) != 2 {
+		t.Fatalf("entries after the name = %d, want the prompt and the answer", len(entries.Entries))
 	}
 
 	h.sendJSON(map[string]any{"type": "get_entries", "since": "missing"})
@@ -992,7 +1001,11 @@ func TestServeEntriesAndTree(t *testing.T) {
 	if len(tree.Tree[0].Children) != 1 {
 		t.Fatalf("children = %d, want one", len(tree.Tree[0].Children))
 	}
-	if tree.LeafID == nil || *tree.LeafID != tree.Tree[0].Children[0].Entry.ID {
+	prompt := tree.Tree[0].Children[0]
+	if len(prompt.Children) != 1 || prompt.Children[0].Entry.ID != answer {
+		t.Fatalf("answer is not the prompt's only child")
+	}
+	if tree.LeafID == nil || *tree.LeafID != answer {
 		t.Fatalf("leaf = %v, want the assistant entry", tree.LeafID)
 	}
 	// Every node carries a children array, even a leaf, so a client can walk

@@ -6,6 +6,7 @@ import (
 	"sync"
 
 	"pi-go/internal/agent"
+	"pi-go/internal/session"
 	"pi-go/internal/wire"
 )
 
@@ -249,11 +250,37 @@ func (a *App) persist(message wire.Message) error {
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	a.nameFromFirstMessage(message)
 	if _, err := a.manager.AppendMessage(message); err != nil {
 		return err
 	}
 	a.messages = append(a.messages, message)
 	return nil
+}
+
+// nameFromFirstMessage names an unnamed session after the first thing the user
+// said.
+//
+// Every user message reaches this function, from the command line and from the
+// window alike, which is why the name is decided here: a conversation started
+// either way ends up with the same label. It runs only while the session has no
+// name, so a label the reader is watching never changes under them, and /rename
+// stays the way to override it.
+//
+// The name is written before the message it describes. A label recorded after
+// it would sit between the prompt and its answer, and the session tree would
+// then read as though the reader had renamed the conversation mid-exchange.
+//
+// The write is best effort on purpose. A name is cosmetic, and the turn that
+// produced this message must not be cancelled because a label could not be
+// recorded.
+func (a *App) nameFromFirstMessage(message wire.Message) {
+	if message.Role != wire.RoleUser || a.manager.Name() != "" {
+		return
+	}
+	if name := session.DeriveName(message.Text()); name != "" {
+		_, _ = a.manager.AppendSessionInfo(name)
+	}
 }
 
 // runTurn drives prompts through ag and reports what it produced.

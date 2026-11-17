@@ -308,7 +308,9 @@ func TestExportTakesItsFormatFromTheExtension(t *testing.T) {
 		name string
 		want string
 	}{
-		{"session.md", "# atlas session "},
+		// The session named itself after its first message, and the heading
+		// follows the name; the id fallback is covered separately.
+		{"session.md", "# hi"},
 		{"session.html", "<!DOCTYPE html>"},
 		{"session.jsonl", `"type":"session"`},
 	}

@@ -188,9 +188,9 @@ func contextField(tokens, window int) string {
 	return "ctx " + formatTokens(left) + " left"
 }
 
-// sessionField names the session. Until /name sets one, what a session has is
-// its id; eight characters tell two sessions apart and match what the banner
-// prints.
+// sessionField names the session. Until /rename or the derived name gives it
+// one, what a session has is its id; eight characters tell two sessions apart
+// and match what the banner prints.
 //
 // A session with nothing in it has no field at all. Opening atlas does not start
 // a conversation: the screen is the home page until the first message, and an id

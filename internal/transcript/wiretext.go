@@ -1,9 +1,10 @@
-package tui
+package transcript
 
-// The small conversions the transcript needs on the way from a wire event to a
-// line of text. They are copied from cmd/atlas/render.go, which keeps its own
-// while the inline interface still exists; this package is where they end up
-// once that one is deleted.
+// The small conversions the fold needs on the way from a wire event to a line
+// of text. They live here rather than in a renderer because the fold decides
+// what a line says: "failed", "1 output line", "Thought for 1.2s" are the same
+// words in every frontend, and only their styling differs. cmd/atlas/render.go
+// keeps its own copies for the inline interface, which is deleted.
 
 import (
 	"encoding/json"
@@ -109,11 +110,11 @@ func resultBody(texts []string) string {
 // progressCells is how much of a progress message fits on the marker line. The
 // tail is one line by contract, so an update that came with a paragraph — or a
 // stack trace — is cut the same way an argument preview is.
-const progressCells = 60
+const ProgressCells = 60
 
 // shortProgress folds a server's progress message onto that one line.
 func shortProgress(text string) string {
-	return truncate(strings.Join(strings.Fields(text), " "), progressCells)
+	return truncate(strings.Join(strings.Fields(text), " "), ProgressCells)
 }
 
 func truncate(value string, limit int) string {

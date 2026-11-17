@@ -8,6 +8,8 @@ package tui
 import (
 	"strings"
 	"testing"
+
+	"pi-go/internal/transcript"
 )
 
 // TestFoldingAStretchKeepsItsTitle: a folded stretch draws one line — the marker
@@ -106,7 +108,7 @@ func TestToggleAllFoldsEveryStretchThenUnfoldsThem(t *testing.T) {
 		t.Fatal("a turn of four stretches cannot be folded at all")
 	}
 	for _, span := range tr.Spans() {
-		if framed(tr.Blocks()[span.First].Role) && !span.Collapsed {
+		if transcript.Framed(tr.Blocks()[span.First].Role) && !span.Collapsed {
 			t.Fatalf("span %v was left unfolded", span)
 		}
 	}

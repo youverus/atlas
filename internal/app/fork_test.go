@@ -3,6 +3,7 @@ package app
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"testing"
@@ -339,7 +340,24 @@ func TestForkAtRejectsInvalidEntriesAndBusy(t *testing.T) {
 	if _, err := application.ForkAt("missing"); !errors.Is(err, ErrInvalidForkEntry) {
 		t.Fatalf("missing entry err = %v, want ErrInvalidForkEntry", err)
 	}
-	assistantID := manager.Entries()[1].ID
+	// The session named itself before the prompt, so the answer is not at a
+	// fixed index: it is found by role, which is what "not a user message"
+	// means here.
+	assistantID := ""
+	for _, entry := range manager.Entries() {
+		if entry.Type != session.TypeMessage {
+			continue
+		}
+		var probe struct {
+			Role wire.Role `json:"role"`
+		}
+		if err := json.Unmarshal(entry.Message, &probe); err == nil && probe.Role == wire.RoleAssistant {
+			assistantID = entry.ID
+		}
+	}
+	if assistantID == "" {
+		t.Fatal("the session has no assistant entry to reject")
+	}
 	if _, err := application.ForkAt(assistantID); !errors.Is(err, ErrInvalidForkEntry) {
 		t.Fatalf("assistant entry err = %v, want ErrInvalidForkEntry", err)
 	}

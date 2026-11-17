@@ -772,6 +772,100 @@ func TestBranchRejectsUnknownEntry(t *testing.T) {
 	}
 }
 
+// autoName runs one exchange and reports the name the session carries.
+func autoName(t *testing.T, manager *session.Manager, prompts ...string) *App {
+	t.Helper()
+	application := newTestApp(t, manager, faux.New(faux.Response{Text: "done"}))
+	for _, prompt := range prompts {
+		if _, err := application.Ask(context.Background(), wire.UserMessage(prompt), nil); err != nil {
+			t.Fatalf("ask %q: %v", prompt, err)
+		}
+	}
+	return application
+}
+
+// A conversation names itself from the first thing the reader said, which is
+// what both frontends show in their session list.
+func TestFirstUserMessageNamesTheSession(t *testing.T) {
+	manager := newSession(t)
+	application := autoName(t, manager, "用 read 工具读 go.mod，只回答第一行的 module 名称")
+	if got, want := application.Name(), "用 read 工具读 go.mod"; got != want {
+		t.Fatalf("name = %q, want %q", got, want)
+	}
+}
+
+// A name the reader is watching must not change under them, so only the first
+// message decides it.
+func TestLaterMessagesKeepTheFirstNames(t *testing.T) {
+	manager := newSession(t)
+	application := autoName(t, manager, "fix the parser", "and then run the tests")
+	if got, want := application.Name(), "fix the parser"; got != want {
+		t.Fatalf("name = %q, want %q", got, want)
+	}
+}
+
+// A name set by hand outranks a derived one, and naming by hand stays possible
+// after the first message.
+func TestSetNameOutranksTheDerivedName(t *testing.T) {
+	manager := newSession(t)
+	application := newTestApp(t, manager, faux.New(faux.Response{Text: "done"}))
+	if err := application.SetName("release"); err != nil {
+		t.Fatalf("set name: %v", err)
+	}
+	if _, err := application.Ask(context.Background(), wire.UserMessage("fix the parser"), nil); err != nil {
+		t.Fatalf("ask: %v", err)
+	}
+	if got, want := application.Name(), "release"; got != want {
+		t.Fatalf("name = %q, want %q", got, want)
+	}
+}
+
+// A message with no text names nothing. The conversation stays unnamed until
+// something is actually said, rather than being labelled with an empty string.
+func TestMessageWithoutTextLeavesTheSessionUnnamed(t *testing.T) {
+	manager := newSession(t)
+	application := newTestApp(t, manager, faux.New(faux.Response{Text: "done"}))
+	image := wire.UserMessageBlocks(wire.ImageContent("AAAA", "image/png"))
+	if _, err := application.Ask(context.Background(), image, nil); err != nil {
+		t.Fatalf("ask: %v", err)
+	}
+	if got := application.Name(); got != "" {
+		t.Fatalf("name = %q, want it to stay empty", got)
+	}
+}
+
+// The name lives in the session file as an entry, but it is a label rather than
+// something the model said: the context the next request is built from must not
+// gain a message from it.
+func TestDerivedNameStaysOutOfTheContext(t *testing.T) {
+	manager := newSession(t)
+	autoName(t, manager, "fix the parser")
+	projected, err := manager.BuildContext()
+	if err != nil {
+		t.Fatalf("build context: %v", err)
+	}
+	if len(projected.Messages) != 2 {
+		t.Fatalf("context has %d messages, want the prompt and the answer", len(projected.Messages))
+	}
+}
+
+// The window lists conversations by reading the files, so the name has to be
+// the one a reader of that file finds, not just the one the app is holding.
+func TestDerivedNameReachesTheFile(t *testing.T) {
+	manager := newSession(t)
+	autoName(t, manager, "fix the parser, then run the tests")
+	info, err := session.ReadInfo(manager.File())
+	if err != nil {
+		t.Fatalf("read info: %v", err)
+	}
+	if info == nil {
+		t.Fatal("the session file is not a session")
+	}
+	if got, want := info.Name, "fix the parser"; got != want {
+		t.Fatalf("name on disk = %q, want %q", got, want)
+	}
+}
+
 func TestSetNameSanitizes(t *testing.T) {
 	manager := newSession(t)
 	application := newTestApp(t, manager, faux.New())

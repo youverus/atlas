@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"pi-go/internal/transcript"
 	"pi-go/internal/wire"
 )
 
@@ -58,7 +59,7 @@ func TestToolProgressReplacesItsOwnTail(t *testing.T) {
 		t.Fatalf("rendered transcript has no progress:\n%s", body)
 	}
 
-	now = now.Add(progressEvery)
+	now = now.Add(transcript.ProgressEvery)
 	tr.Apply(progressEvent(t, "a", "4/10"))
 	if got := tr.Blocks()[0].Progress; got != "4/10" {
 		t.Fatalf("progress = %q, want the newer 4/10", got)
@@ -77,7 +78,7 @@ func TestToolProgressDoesNotRepaintFasterThanItCanBeRead(t *testing.T) {
 	runTool(t, &tr, "a", "bash")
 	tr.Apply(progressEvent(t, "a", "1/60"))
 
-	now = now.Add(progressEvery - 50*time.Millisecond)
+	now = now.Add(transcript.ProgressEvery - 50*time.Millisecond)
 	tr.Apply(progressEvent(t, "a", "2/60"))
 	if got := tr.Blocks()[0].Progress; got != "1/60" {
 		t.Fatalf("progress = %q, want the report inside the quiet window dropped", got)
@@ -150,8 +151,8 @@ func TestToolProgressFoldsAMultiLineMessageToOneLine(t *testing.T) {
 	if strings.ContainsAny(got, "\n\r") {
 		t.Fatalf("progress = %q, want the newlines folded", got)
 	}
-	if width := len([]rune(got)); width > progressCells {
-		t.Fatalf("progress is %d runes, want at most %d", width, progressCells)
+	if width := len([]rune(got)); width > transcript.ProgressCells {
+		t.Fatalf("progress is %d runes, want at most %d", width, transcript.ProgressCells)
 	}
 	if !strings.HasSuffix(got, "…") {
 		t.Fatalf("progress = %q, want the cut marked", got)

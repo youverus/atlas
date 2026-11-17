@@ -8,9 +8,12 @@
 #
 #   1. Everything it pulls in comes from the family tests/deps pins, so a stray
 #      dependency cannot enter the binary through the interface.
-#   2. It talks to the kernel through wire and theme only. The interface must not
-#      import app or agent: cmd/atlas adapts between them, and that is what keeps
-#      the program testable headless and the kernel unaware of the screen.
+#   2. It talks to the kernel through wire, theme and transcript only. The
+#      interface must not import app or agent: cmd/atlas adapts between them,
+#      and that is what keeps the program testable headless and the kernel
+#      unaware of the screen. transcript is the third entry because the fold is
+#      the model of an interface rather than an interface: it holds no cells and
+#      imports no third party.
 set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib.sh"
 cd "$TREE_ROOT"
@@ -25,7 +28,14 @@ pinned_family=(
 )
 
 # allowed_local is the whole of what the interface may know about the kernel.
-allowed_local=("pi-go/internal/theme" "pi-go/internal/wire")
+#
+# transcript joined the list with the second interface. It is the fold and its
+# state — blocks, spans, folding, the reveal window — and it draws nothing, so a
+# window can import the same package without importing the screen. Duplicating
+# the fold per frontend was the alternative, and two folds disagree on the first
+# event shape they read differently. The rule this list protects is unchanged:
+# no app, no agent, no session, no provider.
+allowed_local=("pi-go/internal/theme" "pi-go/internal/wire" "pi-go/internal/transcript")
 
 step "tui: the interface adds no module of its own"
 third_party() {
@@ -56,7 +66,7 @@ if [[ -n $stray ]]; then
 fi
 ok "every module reachable from the interface is reachable from ${pinned_family[*]}"
 
-step "tui: the interface talks to the kernel through wire and theme only"
+step "tui: the interface talks to the kernel through wire, theme and transcript only"
 imported=()
 while read -r dep; do
 	[[ $dep == pi-go/internal/tui ]] && continue

@@ -43,7 +43,8 @@ cmd/atlas（CLI 前端）
 
 desktop（独立模块 pi-go/desktop，Wails 需要 cgo，因此不进 CLI 的静态二进制）
   ├─> internal/assembly
-  ├─> internal/httpapi ──> internal/wire
+  ├─> internal/httpapi ──> internal/httpapi/web, internal/wire
+  ├─> internal/webhost ──> internal/assembly, internal/config, internal/httpapi, internal/project, internal/session
   └─> internal/wire
 
 internal/assembly（组合根：两个前端共用的装配，也是唯一选择厂商的地方）
@@ -58,6 +59,7 @@ internal/assembly（组合根：两个前端共用的装配，也是唯一选择
   ├─> internal/provider/google ──> internal/provider, internal/sse, internal/wire
   ├─> internal/provider/openai ──> internal/provider, internal/sse, internal/wire
   ├─> internal/provider/responses ──> internal/provider, internal/sse, internal/wire
+  ├─> internal/project ──> (仅标准库)
   ├─> internal/sandbox ──> (仅标准库)
   ├─> internal/session ──> internal/wire
   ├─> internal/skill ──> (仅标准库)
@@ -80,9 +82,12 @@ internal/provider/conformance ──> internal/provider, internal/wire
 internal/provider/google ──> internal/provider, internal/sse, internal/wire
 internal/provider/openai ──> internal/provider, internal/sse, internal/wire
 internal/provider/responses ──> internal/provider, internal/sse, internal/wire
+internal/project ──> (仅标准库)
 internal/sandbox ──> (仅标准库)
 internal/skill ──> (仅标准库)
-internal/httpapi ──> internal/wire
+internal/httpapi ──> internal/httpapi/web, internal/wire
+internal/httpapi/web ──> (仅标准库)
+internal/webhost ──> internal/assembly, internal/config, internal/httpapi, internal/project, internal/session
 internal/sse ──> (仅标准库)
 internal/session ──> internal/wire
 internal/task ──> internal/tool
@@ -640,6 +645,7 @@ pi 的会话格式：一个 JSONL 文件，首行是 header，之后每条是一
 | `session.go` | `Manager`：追加、分支、标签、投影、懒落盘、树 |
 | `fork.go` | 分支导出（`CreateBranchedSession`）、跨项目 fork（`ForkFrom`） |
 | `list.go` | 会话目录、列表（可按 cwd 过滤，跳过归档）、跨项目合并的 `ListAll` / `ListArchivedAll`（共用 `listBuckets`）、`ListArchived`、最近会话与按 id 查找 |
+| `name.go` | `DeriveName`：把用户那句话折成一行会话名（`maxDerivedName` = 48 字符、`minDerivedClause` = 6、`clauseBreaks` 与 `namePrefixes` 两张字符表）。取第一条带内容的行、去掉行首 markdown 记号、折叠空白、够长就留下第一句、仍然超长才截断并补省略号。没有模型调用，所以离线可用、零成本，且两个前端对同一句话给出同一个名字 |
 | `cwd.go` | `MissingCwd`：记录的 cwd 还在不在，只回答事实，不含策略 |
 | `archive.go` | 归档标记：`ArchiveSuffix` / `ArchiveMarker` / `Archived` / `Archive` / `Unarchive` / `DeleteFile`、`ErrNoSessionFile` |
 
@@ -690,7 +696,15 @@ pi 的会话格式：一个 JSONL 文件，首行是 header，之后每条是一
 
 **包不写会话。** `Run` 只返回 `Result`，落盘由 `app` 做：只有调用方知道追加到哪个分支、怎样发事件。`Details()` 把文件清单编码成 pi 的 `readFiles` / `modifiedFiles`，空列表写 `[]` 而不是 `null`——会话文件里同一个字段不该有两种形状。
 
-### app（913 + 330 + 234 + 242 + 117 + 278 + 200 + 84 + 170 + 215 = 2783 行 + 4488 行测试）
+### project（246 行 + 149 行测试）
+
+项目清单：「哪些文件夹算项目」是读者自己决定的事，不是会话的属性。会话文件已经记着自己跑在哪个目录（第 109 条），所以这里只存额外那几个文件夹的路径；读它的人只有一个——`internal/webhost` 在拼分组列表时把默认目录与这份清单合起来。它是一层叶子：只依赖标准库，不认识 `session`、`app`，也不认识任何界面。
+
+| 文件 | 内容 |
+|---|---|
+| `project.go` | `Store` 与五个方法：`Open(path)`（缺失或损坏都得到一份空清单，不报错）、`List()`（按加入顺序返回副本）、`Has(path)`、`Add(path)`（展开 `~`、转绝对路径、`os.Stat` 必须是目录、同一目录不重复加入）、`Remove(path)`（只删条目，从不碰文件夹）。写入用临时文件加 `os.Rename` 原子替换：清单被两个窗口同时读时不会读到半段 JSON。判定「同一个目录」先比字符串，再比 `EvalSymlinks` 的结果——picker 交回来的是解析过的路径，清单里记的可能是读者手打的那一个。 |
+
+### app（932 + 357 + 234 + 242 + 117 + 278 + 200 + 84 + 170 + 215 + 117 = 2946 行 + 4739 行测试）
 
 编排层。`agent` 不知道会话，`session` 不知道 turn，所以必须有东西把两者绑在一起——`app` 就是那个东西，也是前端唯一驱动的对象。
 
@@ -705,6 +719,7 @@ pi 的会话格式：一个 JSONL 文件，首行是 header，之后每条是一
 | `archive.go` | 归档：`Archived` / `Archive` / `Restore` / `Delete`、`ErrArchived` / `ErrNotArchived` / `ErrNothingToArchive`、写屏障 `guardArchived` |
 | `stats.go` | `TokenStats` / `ContextStats` / `SessionStats` 与 `App.SessionStats`（全会话汇总与按模型窗口换算的上下文占用） |
 | `continuation.go` | `Continuation` / `ContinuationKind` 与 `App.Continuation` / `App.Continue`：读 transcript 的尾部判断断在哪一步，再补一次请求接着跑（第 8 节第 97 条） |
+| `project.go` | `App.SessionDir` / `App.NewSessionIn` 与 `sessionDirFor`：在指定目录开一个新会话，重绑 manager 之后一并重读 `PromptSource`、清队列、回落到 base 模型与思考档位（第 8 节第 109 条）。目录由 `Config.SessionDir` 这个策略回调给出，回调为 nil 时明确报错——默认的分桶布局与自定义的单目录布局无法互猜，猜错会把一个项目的对话列到另一个名下 |
 
 **持久化发生在 `message_end`，不是 run 结束。** pi 在 `message_end` 监听器里 `appendMessage`，Go 侧把同一个时机放在事件回调里：每条消息一完成就落盘，崩溃只丢未完成的那条，而不是整轮。落盘在回调里还有一个副作用是必要的——并行工具会并发产生 `message_end`，而 `session.Manager` 没有内部锁，靠 emitter 自带的互斥把写入串起来。落盘失败会 `cancel()` 整轮：让工具继续跑、结果却记不下来的话，会话文件会变成一份没有发生过结果的对话。
 
@@ -763,15 +778,28 @@ JSONL stdin/stdout 传输，兼容 `pi --mode rpc`。四个文件各管一件事
 
 **模型表是 `app` 的，传输层只挑字段。** `get_available_models` 把 `App.Models()` 摊成 `[Model]`；`cycle_model` 与 `cycle_thinking_level` 直接转述 `app` 的结果；`set_thinking_level` 先过七级词表（词表外的名字才算笔误）再交给 `FitThinking` 夹取，夹出来的值不回传——pi 的响应没有 `data`，客户端从 `get_state` 读，而"发了什么"与"报了什么"在这一层只能有一个答案。两件与 pi 对着写的小事：`cycle_*` 无事可做时 `data` 是显式 `null` 而不是省略键（客户端的类型是 `result | null`，测试断言的是键在、值为 `null`），`isScoped` 恒 `false`（内核的表就是全部，没有 `--models` 那样的子集）。内核没拿到模型表时（`-demo`，或前端自己造的 `app`），`get_available_thinking_levels` 退回七级词表、`cycle_*` 回 `null`——"没人告诉我"与"这个模型不能思考"是两个答案，前者给最宽的那个。
 
-### httpapi（311 + 197 + 257 = 765 行 + 348 行测试）
+### httpapi（355 + 197 + 231 + 512 = 1295 行 + 765 行测试）
 
-回环 HTTP + SSE 数据面，一个窗口读的那四条路由。它存在的理由是界面形态变了：全屏 TUI 把 transcript 拿在手里自己画，而 webview 只能读别人发给它的东西，所以需要一个把事件流推出去的地方。选 HTTP + SSE 而不是任何 shell 私有通道，是为了前端零耦合——同一份页面将来可以放进浏览器、由 `atlas web` 提供，或者塞进任何外壳，一行都不用改；而审批框要阻塞一个工具 goroutine，在 HTTP 里就是一个普通的阻塞 POST，在双向 frame 里则是另一种东西。
+回环 HTTP + SSE 数据面，一个窗口读的两组路由：单会话的那五条（页面、状态、事件流、提问、审批）与宿主注入的那十二条（会话列表与开关、模型目录与切换、推理强度、用量、目录与文件）。它存在的理由是界面形态变了：全屏 TUI 把 transcript 拿在手里自己画，而 webview 只能读别人发给它的东西，所以需要一个把事件流推出去的地方。选 HTTP + SSE 而不是任何 shell 私有通道，是为了前端零耦合——同一份页面将来可以放进浏览器、由 `atlas web` 提供，或者塞进任何外壳，一行都不用改；而审批框要阻塞一个工具 goroutine，在 HTTP 里就是一个普通的阻塞 POST，在双向 frame 里则是另一种东西。
 
 | 文件 | 内容 |
 |---|---|
-| `httpapi.go` | `Server` 与四条路由：`GET /` 交页面、`GET /api/state` 报 `running` 与三条事实、`GET /api/events` 开流、`POST /api/ask` 起一轮。`Turn` 在这里声明、由组合根注入——与 `tool/shell` 的 `Sandbox`、`tool.Recorder` 同一条反转，所以这个包不认识 provider、tool 或 agent，`tests/httpapi/run.sh` 钉住这条线。`Listen` 绑 `127.0.0.1:0` 并把真实地址交回去（固定端口是别人已经占着的端口）；`guard` 检查 `Host` 与 `Origin`，这是"我们的窗口"与"任意标签页"的分界——公网页面可以 POST 到 127.0.0.1，而 DNS rebinding 会让浏览器把自己那个域名当 `Host` 发过来。单轮闩是 CAS 而不是队列：一秒内点两下不该把同一句话排队重放，而排队的那一条在界面上完全看不见。`POST` 立刻返回 202，事件走流——把 POST 挂着只会给窗口第二个、形状不同的通道 |
+| `httpapi.go` | `Server` 与五条路由：`GET /` 交页面、`GET /api/state` 报 `running`、三条事实与待答的审批、`GET /api/events` 开流、`POST /api/ask` 起一轮、`POST /api/approval` 回答一次审批。`Turn` 在这里声明、由组合根注入——与 `tool/shell` 的 `Sandbox`、`tool.Recorder` 同一条反转，所以这个包不认识 provider、tool 或 agent，`tests/httpapi/run.sh` 钉住这条线。`Listen` 绑 `127.0.0.1:0` 并把真实地址交回去（固定端口是别人已经占着的端口）；`guard` 检查 `Host` 与 `Origin`，这是"我们的窗口"与"任意标签页"的分界——公网页面可以 POST 到 127.0.0.1，而 DNS rebinding 会让浏览器把自己那个域名当 `Host` 发过来。单轮闩是 CAS 而不是队列：一秒内点两下不该把同一句话排队重放，而排队的那一条在界面上完全看不见。`POST` 立刻返回 202，事件走流——把 POST 挂着只会给窗口第二个、形状不同的通道 |
 | `sse.go` | 广播与那一条流。`broker` 的 publish 永不阻塞：某个读者落后超过 `streamBuffer`（256）条就丢最旧的一条——宁可让冻结的窗口少一次重绘，也不让整轮对话卡在它的 socket 上。每个订阅者有自己的 channel 与关闭信号，写只发生在拥有那个连接的 handler 里。帧的 `data` 恒为一行，因为 `json.Marshal` 不产生换行：真出现换行时会静默把一个帧劈成两个事件。`retry: 1000` 让窗口切到后台再回来能自己重连；15 秒一次的注释心跳不是保活，而是唯一可靠的"没人读了"信号 |
-| `page.go` | 骨架的整个前端：一份内联文档，没有构建步骤、没有框架、没有远程引用。它故意内联——一份资源目录要么需要 `go:embed` 已构建的产物（那会让内核的构建依赖 node），要么需要第二个服务器；一份文档就能证明流是通的，而真正的界面仍然可以换成任何说得同样四条路由的东西。脚本只用 `EventSource` 与 `fetch`，所以"客户端契约"可以靠读一个文件核对完 |
+| `approval.go` | 审批通道：`Ask(Question) Decision` 阻塞调用它的那个工具 goroutine，把问题以 `approval` 事件推给页面，答案从 `POST /api/approval` 回来。三条设计约束写在这里。第一，形状是本包自己的（`Question` / `Decision`）——`httpapi` 只许依赖 `wire`（`tests/httpapi/run.sh` 钉住），所以外壳把 `assembly.Ask` 适配进来，与 `Turn` 同一条反转。第二，登记表按 id 存而不是单槽：页面刷新会丢掉流但丢不掉那个还挂着的 goroutine，`/api/state` 的 `pending` 就是给它重画的，答案按 id 回，所以重画出来的框仍能关掉当初那个调用。第三，兜底一律是否——没有窗口、服务器已关、十分钟超时，三种情况都是 `Decision{}`，猜"是"是唯一会丢数据的答案；`Close` 会把还开着的问句全部拒绝，否则退出窗口就等于把一轮永远停在工具上 |
+| `host.go` | 窗口的第二组路由：会话列表与切换/新建/归档/恢复/删除、**按项目分组的会话列表与项目的增删**、模型目录与切换、推理强度、用量统计、目录与文件读取。这些能力在本包内只以 `Host` 接口的形式出现，由组合根注入（`internal/webhost` 是唯一的实现）——理由与 `Turn` 相同：一旦让 `httpapi` import `app` 或 `session`，传输层就开始判断"什么是一轮对话"，而 `app` 与 `rpc` 共享的"前端驱动同一个循环"这条性质就没了。`Host` 为 nil 时这些路由不注册，单会话页面照旧工作，`-offline` 与测试走的就是这条。项目那四条（`GET /api/projects`、`POST /api/projects`、`POST /api/projects/remove`、`POST /api/projects/pick`）与别处同形，只有一处刻意的不同：文件夹选择器是半请求的——`Picker` 为 nil 时那条路由回 501，让前端知道"这个构建没有对话框"并换成手填路径，而不是回一个空路径假装读者取消了。`/api/sessions/new` 复用一条路由、body 可选：空 body 是"就在这儿开"，带 `{cwd}` 才是"在那个项目里开" |
+| `web/` | 内嵌的前端产物：`web.go` 只有一行 `//go:embed all:dist` 与一个 `fs.FS`，`dist/` 是 `go/web` 的 `npm run build` 出来的文件，提交进仓库。这个交换是本包唯一不靠猜的地方——内核的 `go build` 不能依赖 node，所以产物入库、node 只在改前端时需要。缓存策略按两种文件分：`index.html` 走 `no-cache`（重建后的二进制不该被喂上星期的文档），`assets/` 下的带哈希文件走 `immutable`。找不到的路径交回 `index.html` 而不是 404，深链由前端路由自己决定 |
+
+
+
+### webhost（323 + 205 = 528 行 + 103 行测试）
+
+桌面窗口的宿主适配器，全树唯一同时持有 `assembly.Kernel` 与 `httpapi` 的包。它存在的理由是两个反转都要有人兑现：`httpapi` 声明 `Host` 接口但不认识 `app`，`assembly` 造出 `Kernel` 但不知道 HTTP——中间的翻译只写一处，第二个界面才不会分叉出第二种"什么算一条会话"。它是一层适配而非一层功能：自己没有路由、没有状态机，每个方法都是"取内核的事实，翻译成前端的契约"。
+
+| 文件 | 内容 |
+|---|---|
+| `webhost.go` | `New(kernel) httpapi.Host` 与十二个方法。`SessionInfo` / `ModelOption` / `Stats` / `FileEntry` 逐字段翻译，而不是把 `app` 的类型直接交给前端：那些类型的字段是内核的实现细节，前端拿到的应当是它画得出来的东西。`confine(root, path)` 是文件两条路由共用的边界——把前端给的任意写法（`../..`、绝对路径、空路径）归一到工作目录内，**越界的写法被夹回根内而不是报错**，所以前端不必推理哪些路径会被拒，它只需要画它收到的那一棵；这个选择与理由写在测试旁边。`ReadDir` 隐藏 dotfiles 且目录优先：排序发生在翻译之后，因为"目录在前"是界面的事实，不是文件系统的事实。`ReadFile` 上限 1MB 并按前若干字节里有没有 NUL 判二进制——不猜字符编码，猜错的代价是把二进制当散文喂给窗口。`DeleteSession` 拒绝删当前打开的那个会话：删掉它等于把正在跑的这一轮对话的文件从底下抽走。项目的清单从 `Options.Projects` 来（`New` 用 `config.DefaultHome()` 拼出默认位置，`NewWith` 让测试指定一条真实的临时文件），所以两个构造函数并存：一个给窗口、一个给测试 |
+| `projects.go` | 分组列表与项目的增删，四个方法都在这一个文件里。`Projects` 把默认目录与清单合成分组（`mergeGroups` 纯函数：默认在前、按目录身份去重），归档模式丢空组——归档是"还能恢复什么"的列表，一排空表头本身就是空的样子。`sessionsIn` 对原路径与 `EvalSymlinks` 结果各查一次桶再按 `sameDir` 过滤并按路径去重（第 109 条第四点）。`NewSessionIn` 只放行默认目录与已列项目：这是一个界面按钮的目标，不是通用的"在任意目录开对话"入口，放开它等于把「哪些文件夹算项目」这条判断交给前端 |
 
 
 
@@ -899,7 +927,7 @@ JSONL stdin/stdout 传输，兼容 `pi --mode rpc`。四个文件各管一件事
 
 - **`@` 是这一层的语法，不是内核的。** 三种输入语言都在 `cmd/atlas`：`/` 是命令、`@` 是引用、其余是散文。内核收到的永远是 `[]wire.Content`，`app` 不认识 `@`，也就不必为"引用失败该不该发"决定一次；`attachMessage` 失败时那一轮直接不发（全屏会话把它变成一行红字，管道把它变成非零退出），因为"模型照着散文回答了一个它没看见的文件"是读者从答案里看不出来的那种错。同一个理由把 `ask` 与 `askLine` 分开：`/init` 与 `/skill` 的正文是程序写的，里面的 `@` 是散文；只有读者打的字才解析引用。RPC 那条路也不解析——客户端送的是结构化的 `images` 字段，把它的 prompt 文本再解释一遍会让同一个协议有两种含义（pi 在 RPC 模式下对 `@file` 参数直接报错，是同一个判断）。
 
-- **状态栏的六段都是能证明的，没有声明出来的。** 目录来自会话 cwd、会话名来自 `app.Name()`（没有 `/rename` 过就是 id 前八位）、模型来自 `App.Model()`、思考档位来自 `App.ThinkingLevel()` 加模型的 `reasoning`、上下文来自 `compact.EstimateProjection`（与自动压缩同一个估算，所以「还剩 8k」和「该压了」不会互相矛盾）。权限这一段最需要解释：Go 侧没有沙箱，写一个 `yolo` / `ask` 之类的等级就是在撒谎，所以它报告的是授予的工具集（`fs.Tools` + `shell.Tools` 归纳成 `fs+bash`）。档位这一段是唯一会整段消失的：`off` 与「模型不会思考」都不产生一个能发出去的档位，`thinkingField` 就返回空串，`joinFields` 顺手把它略过——状态栏与 `/model` 的反馈共用 `sendsThinking` 这一条判断，两处不会各说一套。降级阶梯（丢 provider → 缩目录 → 丢会话 → 丢工具摘要 → 再缩目录 → 丢目录 → 丢档位 → 只留档位与上下文）写在组合根而不是界面里：`tui.Config.Status` 只拿到宽度，哪个字段可舍是这一层的事。权限档位不在这条阶梯的"丢"一侧：它是独立字段（第 100 条），从第五档起取代工具摘要的位置，一直到最后一档都还在——`grants` 与 `mode` 分开正是为了让"工具摘要走了"不等于"档位也走了"。重画每按一个键一次，而那个估算要遍历整个分支，所以 `statusBar` 按「会话 id + `EntryCount` + provider/model」记忆化；档位不在缓存键里，因为它不影响估算，只影响这一行的字。
+- **状态栏的六段都是能证明的，没有声明出来的。** 目录来自会话 cwd、会话名来自 `app.Name()`（`/rename` 改过就用它；没改过则是第一条用户消息派生出来的名字，见第 108 条；连名字都派不出来时才是 id 前八位）、模型来自 `App.Model()`、思考档位来自 `App.ThinkingLevel()` 加模型的 `reasoning`、上下文来自 `compact.EstimateProjection`（与自动压缩同一个估算，所以「还剩 8k」和「该压了」不会互相矛盾）。权限这一段最需要解释：Go 侧没有沙箱，写一个 `yolo` / `ask` 之类的等级就是在撒谎，所以它报告的是授予的工具集（`fs.Tools` + `shell.Tools` 归纳成 `fs+bash`）。档位这一段是唯一会整段消失的：`off` 与「模型不会思考」都不产生一个能发出去的档位，`thinkingField` 就返回空串，`joinFields` 顺手把它略过——状态栏与 `/model` 的反馈共用 `sendsThinking` 这一条判断，两处不会各说一套。降级阶梯（丢 provider → 缩目录 → 丢会话 → 丢工具摘要 → 再缩目录 → 丢目录 → 丢档位 → 只留档位与上下文）写在组合根而不是界面里：`tui.Config.Status` 只拿到宽度，哪个字段可舍是这一层的事。权限档位不在这条阶梯的"丢"一侧：它是独立字段（第 100 条），从第五档起取代工具摘要的位置，一直到最后一档都还在——`grants` 与 `mode` 分开正是为了让"工具摘要走了"不等于"档位也走了"。重画每按一个键一次，而那个估算要遍历整个分支，所以 `statusBar` 按「会话 id + `EntryCount` + provider/model」记忆化；档位不在缓存键里，因为它不影响估算，只影响这一行的字。
 - **`/model` 无参数就是"有哪些模型、每个能调到几档"。** 菜单把两件事合成一次问答：`↑`/`↓` 选模型，`←`/`→` 在**这一行**的档位上转（`modelChoices` 逐模型填 `Steps`，所以 `off` 与不思考的模型各行其是），`Enter` 一次取走两边——`pickSpec` 拼成 `value` 或 `value:level`，然后走的就是下面那条带参数的路，校验、落盘、反馈一个字都不另写。打开时光标停在该模型**当前生效**的那个级别上（`gearIndex` 向下取最近：会话是 `high`、而这一行只声明到 `low`，就停在 `low`），于是一个菜单同时答"现在是什么"和"还能去哪"。带了参数才切换：先拿整串当模型名、失败才剥掉 `:level`（`llama3:8b` 与 `llama3:8b:high` 因此各自可用），然后写 `model_change`、报 `(thinking: level)`、失败时列出这个模型真有的档位。级别要过两道关：名字得在协议词汇里，还得是这个模型能发的——`assembly.FitThinking` 拿"声明 > 表 > 零值"的那条轴夹一次（会话是 `xhigh`、模型只到 `high`，就取 `high` 并补一行说明），说明由 `resolveSpec` 一起带回、`apply` 打在 `model:` 行下面；没有档位轴（不思考）的模型只收 `off`，写别的会报 `does not think, so only off can be sent`。选中的正是当前模型时不写会话记录：`SetModel` 只在真的变化时写，否则敲一遍同样的名字也会多一条。
 - **`/export` 是"终端关了还能读"，所以导出全部内容，只丢 system。** thinking 折进 `<details>`：它是对话的一部分，但通常不是来找的东西。工具结果独立成 `## Tool result:` 一节，而不是缩在调用下面——它在 transcript 里本来就是一条独立消息，长结果缩排后会读成请求的一部分。system 消息不导出：每个会话都一样，而且是文件里最长的部分，消息数也因此不数它。栅栏按正文里最长的反引号串加一来定，工具输出里嵌着代码块也不会把文档撕开。默认文件名用会话 id 前八位（与状态栏同一段前缀），所以同一会话导出两次是覆盖同一个文件，而不是堆一串带时间戳的副本；给了路径就写那里（`~` 展开、相对路径相对会话 cwd），但**不建父目录**：打错的路径应该像打错的路径，而不是静默造出一棵目录树。
 - **三种格式答三个问题，所以扩展名决定格式。** Markdown 在编辑器里读，HTML 在浏览器里读，JSONL 根本不读——它是会话文件，`-resume` 能再打开。一条规则管住三件事：文件叫什么就该是什么，`/export notes.html` 不可能写出 Markdown；裸 `--md` / `--html` / `--jsonl` 是"默认文件名加这个格式"的简写，因为"给我一份 HTML"用路径说不出来（除非把会话 id 再打一遍）。HTML 里**表格与代码块是元素，不是原始文本**：这是它相对 Markdown 存在的唯一理由，否则多一层转义只是把文件变大。自包含同样不是偏好——样式内联、没有脚本、打开时不取任何东西，一份报告因此在断网的机器上与写它的机器上长得一样。图片不内嵌：截图是兆字节级，导出是一份要读的文档，不是要交接的档案，所以两张文档都只写 `[image: <mime>]`（`imageNote` 一处措辞）。JSONL 则不写"文档"：它把 `Header` 与当前分支原样交给 `session.EncodeFile`，再借 `relinkBranch` 把 `parentId` 串成一条链——根条目必须是 `null`，否则文件里描述的是一条不在这份文件里的分支。**不做 `export_html` 那条 RPC**（第 15 条）：渲染住在这层，`rpc` 够不着它。
@@ -1280,6 +1308,10 @@ Ask(...) → … → agent_end
 
 107. **上箭头是"回到会话最顶"的捷径。** body 左上角（第一行最右格）出现一个 `↑`，点它释放全部历史并滚到第一条消息。跟着下来四个决定。**第一，箭头在"有历史没揭示、或滚离了第一行"时存在。** 显示条件 `Hidden() > 0 || offset > 0`——O(1) 判断，不做精确的 `offset < maxOffset()` 判定：那要每帧多折行一次整段 transcript，live 长会话成本翻倍。代价是 live 长会话停在最新处（`offset == 0` 且 `Hidden() == 0`）时没有箭头，先滚一格它才出现，可接受。**第二，落点是 body 第一行的最右格，命中与渲染共用同一套算术。** `upArrowAt` 判 `y == 0 && x == width-1`，与下箭头（`y == bodyHeight()-1`）上下对称；`arrowLine(line, arrow)` 由 0.12.26 的 `downArrowLine` 参数化而来，`↑`/`↓` 只是参数，宽字形覆盖箭头格整只丢弃、空格补到末格前、`Panel().Accent` 上色的走查逻辑一份不改（第 106 条）。body 只有一行时两箭头争同一格：`↓` 后画、点击先判 `downArrowAt`——回最新那条路拥有最后发言权。**第三，跳转先释放全部历史，再置顶。** `jumpToOldest` 按 `revealChunkSpans` 循环 `Reveal` 直到 `Hidden() == 0`，然后 `offset = maxOffset()`、`sel.clear()`——第一行要有地方可滚，得先有全部内容，而 maxOffset 依赖已揭示的总行数，所以必须先揭示后算。**第四，不加键盘绑定。** 与第 106 条一致，用户要的是可点击的箭头，不扩展 scope。测试 `up_arrow_test.go` 六条：有历史未揭示时画、滚离第一行时画、停在最新处不画、点击后 `Hidden() == 0` 且 `offset == maxOffset` 且首行是第一条消息、无隐藏历史时点击同样置顶、点击旁边一格不触发。
 
+108. **会话名由第一条用户消息在本地派生，不调模型。** 一句话发出去之后会话就有了名字：两端的会话列表、状态栏、`/export` 的标题、`/archive` 的回执都用同一个。跟着下来五个决定。**第一，派生是纯函数，不请求模型。** 用模型起标题要一次额外请求：多一份钱、多一个延迟、离线和没有 key 时完全不工作，而且同一个会话在 CLI 与窗口里可能拿到不同的标题（两次调用两次采样）。`session.DeriveName` 只做确定性的事——取第一条带内容的行、去掉行首 markdown 记号（`#` `>` `-` `*` 反引号）、折叠空白、够长就留下第一句（`clauseBreaks` 是中英双语的逗号句号问号冒号等）、仍然超过 48 字符才截断并补省略号；截断时按词边界回退，且只在回退后仍保留一半预算时才回退，所以中文这种没有空格的文字照常截在预算处。于是「用 read 工具读 go.mod，只回答第一行的 module 名称，不要做别的」得到「用 read 工具读 go.mod」，而「好的，帮我跑一下测试」不会退化成「好的」——`minDerivedClause` 是 6，第一句太短就整行照用。**第二，钩在 `persist` 上，因为两个前端都从那里过。** `cmd/atlas` 与桌面窗口的每一次用户消息最后都落到 `App.persist`（`Ask`、steering、follow-up 三条路都汇聚于此），所以名字在这一层决定就等于两端同源；放在 `cmd/atlas` 只有命令行有，放在 `httpapi` 只有窗口有。**第三，名字写在消息之前，不写在它之后。** 先追加 `session_info` 再追加消息，会话树因此读作「名字 → 提问 → 回答」；反过来写这条标签就卡在提问与回答中间，文件读起来像读者在那一轮里改过名，而且从消息落盘到回答落盘这整段（一次完整的模型请求）里 leaf 会是一个标签条目——`omitLastAttempt` 与 fork 都要求 leaf 是消息。**第四，只在没有名字时派生，`/rename` 永远优先。** 读者正看着的标签不该在对话中途换一个；`SetName("")` 清空之后下一个用户消息会重新派生，这也让这次改动之前没有名字的老会话在下次说话时补上。名字写入是 best effort：名字是化妆，一轮答对了的对话不能因为标签写不下去就被取消（与消息本身反过来，消息写不下去要取消整轮）。**第五，不进上下文。** `session_info` 在 `EntryMessages` 的 `default` 分支返回空，`BuildContext` 的消息数因此不变——名字是给读者看的标签，不是模型说过的话，塞进请求就是每次对话都多一条没有信息量的 user 消息。
+
+109. **项目是一个文件夹，会话靠自己的 cwd 归属，不建索引。** 窗口里加了「项目」：选定一个文件夹，那个文件夹下的对话就显示在它名下，也能直接在它里面新开对话；没有项目时对话落在默认目录。跟着下来七个决定。**第一，项目就是路径。** `~/.atlas/projects.json` 里每条只记路径与加入时间，不记会话列表、不记标题：会话文件自己记着 cwd（`session.Info.Cwd`），所以「这个文件夹下有哪些对话」永远是新算的，加项目即刻让既有对话出现、零迁移。**第二，清单不放进 `config.json`。** config 是严格解析（`DisallowUnknownFields`）且命令行共享，加一个只有窗口认识的字段会逼着命令行也理解它，而 `projects.json` 坏掉的代价只是「没有额外项目」而不是「启动失败」——这个不对称决定了它该是独立文件。移除项目只删条目、从不碰会话文件，所以不做二次确认：它不销毁任何东西。**第三，默认目录是隐式项目。** 它始终绘制、不可移除，保证「不添加项目就在默认文件夹开对话」永远有落点；当它与某个项目是同一个目录时合并成一组（`mergeGroups`），否则读者会看到两个同名表头。**第四，找会话要对原路径与 `EvalSymlinks` 结果各查一次桶，再按目录身份过滤。** macOS 上 `/tmp` 是 `/private/tmp` 的符号链接，picker 交回来的是解析过的路径，而会话头记的是进程当时用的那一个；只比字符串会看不见自己项目的对话，只比真实路径又会拿不到手打路径的桶。**第五，新对话的目录由点击位置决定。** 主按钮沿用当前会话目录（进了某个项目就继续在那个项目里），项目表头的 `＋` 显式带上该项目的路径；`App.NewSessionIn` 重绑会话时一并重建工具集与系统提示词，因为 `toolsOf()` 与 `PromptSource` 都按 `manager.Cwd()` 算，只换会话不换工具会让人在 A 项目里拿到 B 项目的文件工具。目录策略是回调（`Config.SessionDir`）而不是约定：默认的分桶布局与自定义的单目录布局无法互猜，policy 为 nil 就明确报错，猜错的后果是把 A 的对话列到 B 名下。**第六，只有桌面端有文件夹选择器。** 原生目录对话框是 Wails 的能力，所以它是 `httpapi` 上的可选 `Picker` 接口；浏览器构建返回 501，前端据此把手填路径的表单换上来，而不是给一个点了没反应的按钮。**第七，没落盘的对话要有地方站着。** 会话文件在与第一条消息同时出现，所以「刚点开的新对话」既不在列表里、也没有 cwd 可读，侧栏因此按「刚在哪个目录开过」画一行占位、页脚显示那个目录；否则点 `＋` 之后屏幕上什么都不变，看起来就是坏了。刻意没做的两件：不进 `config.json`（上面第二条）；不做项目级的默认模型与权限——配置是进程级的一条事实，按项目分裂会让「这个对话为什么用那个模型」失去单一答案。
+
 ## 9. 当前缺口与下一步
 
 缺口分两块：**内核层**（本节上文，第 1–9 条）与**产品层**（与 MCode CLI 相比缺的那部分，Goal 的最小形态 0.12.22 起已落地，见 9.1 与第 103 条）。第 1–9 条是内核层的清单，按依赖分组；可执行的优先级、依赖与完成标准在本节末尾的「施工顺序」，产品层的差距与本阶段明确不做的部分紧跟其后。
@@ -1505,12 +1537,10 @@ Ask(...) → … → agent_end
 
 A15 与 A16 动的是块模型与 turn 生命周期，代价最高，所以排在最后。A15 已在 0.12.15、A16 已在 0.12.16 完成：后者要的是一个可续的断点（工具写到一半、文件只读一半），不是又一个界面开关。A17 是 0.12.18 追加的第十七项，不在原来那一批的排期里：它按用户划定的"最小一层"只落了任务模型、`bash` 的后台执行与三个 `task_*` 工具，唤醒轮、`/tasks` 面板与 subagent 留在本节末尾的未来项里。第 9.3 节的施工顺序（A1–A17）到这里全部走完。
 
-**桌面界面的骨架已立，第二个可用的界面还差两处。** 已落地的是组合根与数据面：装配搬进了 `internal/assembly`（`cmd/atlas` 与 `desktop` 都从它拿同一个 `Kernel`，窗口里跑的是真实 Turn，`-offline` 才是脚本化占位），`internal/httpapi` 把事件流发布成 SSE，`desktop/` 用 Wails v3 开一个窗口指向它。两者之外缺的是：
+**桌面界面已经可用了，剩下的两处不在界面上。** 四处都已到位：装配搬进了 `internal/assembly`（`cmd/atlas` 与 `desktop` 都从它拿同一个 `Kernel`，窗口里跑的是真实 Turn，`-offline` 才是脚本化占位），`internal/httpapi` 把事件流发布成 SSE 并给出单会话那五条路由，`internal/webhost` 把内核的事实翻译成 `Host` 的十二个方法（全树唯一同时持有 `assembly` 与 `httpapi` 的包），`desktop/` 用 Wails v3 开一个窗口指向它；前端在 `go/web`，照 dexon 的设计语言重写，产物提交进 `internal/httpapi/web/dist`，所以 `go build` 不依赖 node。审批走同一条回环 HTTP——`httpapi` 把问题经 SSE 推成一条 `approval` 事件，页面用 `POST /api/approval` 回答，`desktop` 把 `Options.Ask` 接到这条阻塞调用上。剩下的两处：
 
-1. **审批没有通道。** 窗口里已经在跑真装配，所以工具会要求审批，而 `internal/rpc` 的 `extension_ui_response` 至今直接 `return nil`；形状那一半倒是有了——`assembly.Ask` / `assembly.Answer` 是中性的，不再是 `internal/tui` 的类型。接法因此清楚了：`httpapi` 声明一个阻塞的 `POST /api/answer`，把审批请求经 SSE 推给页面，答案从那条 POST 回来。在那之前 `desktop` 不设 `Options.Ask`，门禁读到 nil 就拒绝并说"没有读者"——窗口问不到人，所以窗口里改不了东西。这比默认批准安全，但它不是能用。
-2. **会话文件没有锁。** 全树没有 flock，所以 desktop 与 TUI 同时写一个会话文件会互相覆盖。这不是桌面独有的问题（两个终端跑 atlas 今天就能复现），但桌面让它更容易发生：窗口不会因为终端里那条命令结束而消失。
-
-顺序是 1 → 2：先补审批，再补锁。
+1. **会话文件没有锁。** 全树没有 flock，所以 desktop 与 TUI 同时写一个会话文件会互相覆盖。这不是桌面独有的问题（两个终端跑 atlas 今天就能复现），但桌面让它更容易发生：窗口不会因为终端里那条命令结束而消失。
+2. **`internal/rpc` 的审批还是没有回话。** `extension_ui_response` 至今直接 `return nil`，所以 RPC 前端仍然问不到人。形状已经中性了（`assembly.Ask` / `assembly.Answer`），接法与 `httpapi` 那一半同型，只是那个通道不是 HTTP。
 
 ## 10. 文档维护
 
@@ -1640,3 +1670,4 @@ A15 与 A16 动的是块模型与 turn 生命周期，代价最高，所以排�
 | 2026-11-16 | 更新检查改走网页重定向（0.12.25）：用户报「服务器上 `/update` 403 for forbidden，启动检查也没提示」。根因是 0.12.23 的检查打 GitHub API（`GET /repos/<repo>/releases/latest`），API 对匿名流量按 IP 限流（60 次/小时），服务器与办公机共用出口 IP，配额耗尽即 403；启动检查失败静默是 0.12.23 的设计，所以「没提示」与 403 同源。修法：`cmd/atlas/update.go`（374 行不变）的 `latestRelease` 改打网页层 `GET https://github.com/<repo>/releases/latest`，`CheckRedirect` 在 Location 指向 `/releases/tag/` 时用 `path.Base` 取 tag 并 `http.ErrUseLastResponse` 停住——一次请求即得 tag，不再需要 API 与资产清单；tag 为空且 3xx 报 `GitHub has no release to follow`（仓库没有 release 会 302 到 `/releases`），非 3xx 报 `GitHub says %s`；`releaseInfo` 收成只剩 `TagName`（无 JSON tag，删 `assetInfo` 与 `encoding/json`）；`applyUpdate` 签名改 `(ctx, client, repo, tag, exePath)`，资产 URL 由 tag 推导（`releases/download/<tag>/atlas-<GOOS>-<GOARCH>.tar.gz` 与 `SHA256SUMS`，发布管线命名即约定），删掉「缺资产/缺 SHA256SUMS」预检（下载 404 覆盖，报错仍含资产名）。测试 `update_test.go`（324 → 347 行）：`updateServer` 换成三路由（latest 302 到 tag 页、download 两个），`rewriteTransport` 注释改 github.com，`TestUpdateCommandRefusesAMissingAsset` 改为只给 302 不给资产路由（404 拒绝且报错含资产名），新增 `TestLatestReleaseReadsTheTagFromTheRedirect`（302 取 tag 且不 fetch 页面）与 `TestLatestReleaseRefusesARepoWithoutReleases`（302 到 `/releases` 无 tag 报错）。文档：本文件第 3 节 `cmd/atlas` 标题行数（8997 + 10268 → 8997 + 10291）与 `update.go` 一行、第 8 节第 104 条第一点与第五点改写、9.1 版本更新行；`docs/update.md`（检查条目）同步，版本升到 0.12.25 |
 | 2026-11-16 | 滚动回历史的向下箭头（0.12.26）：用户要「浏览到之前的会话后，点一个向下的箭头快速回到最新消息」。`internal/tui/model.go`（2077 → 2145 行）：`View()` 在 `bodyLines()` 之后、`offset > 0` 时把 body 最后一行交给 `downArrowLine` 重画——按 xansi 字形走查，覆盖最右格（`width-1`）的宽字形整只丢弃不切半、空格补到末格前、末格用 `Panel().Accent` 画 `↓`；`click()` 在 modal 检查之后、选区之前拦截 `downArrowAt`（`offset > 0 && y == bodyHeight()-1 && x == width-1`，与渲染共用同一套坐标算术），命中走 `jumpToNewest`：`offset = 0` + `sel.clear()`，**不 Trim reveal**——跳转是「滚回最新」不是「卸载历史」，已揭示的历史保留、往上滚仍可见。测试新增 `down_arrow_test.go`（111 行五条：只在滚离最新时画、点击跳回并清选区、点击旁边一格不跳、覆盖末格的宽字形整只丢弃且行宽不变、空行上箭头仍在末格）。文档：本文件第 3 节 `tui` 标题行数（5421 + 5448 → 5489 + 5559）与 `model.go` 一行、第 8 节新增第 106 条；`docs/INDEX.md`（`internal/tui/` 一行、变更记录新行）与 `README.md`（能力综述一句、测试清单一条）同步，版本升到 0.12.26 |
 | 2026-11-16 | `/resume` 初始窗口改画最近一条回答 + 上箭头（0.12.27）：用户报「`/resume` 进去之后还是快速绘制，要一进去只画最近一条 agent 回复，之后再慢慢绘制；另外加一个上箭头直接回到会话最上面」。**初始窗口**：`internal/tui/transcript.go`（944 行，行数不变）删掉固定 64 段的 `replayWindowSpans` 与 `Trim(keep)`，新增 `TrimAnswer()`——从最后一个 span 倒序找 `Role == RoleAnswer` 的 span、`reveal = 该下标`，没有回答则 `reveal = 0` 全留；`model.go` 的 `AnswerMsg` 追加后改调 `TrimAnswer()`——重放 burst 每追加一条回答就裁一次，中间帧与最终帧都只画最后一条回答起的内容（回答之后的提示留在窗口里）；固定 64 段在短回答下仍是 64 条消息的快速绘制，正是要消灭的。**上箭头**：`model.go`（2145 → 2178 行）`downArrowLine` 参数化成 `arrowLine(line, arrow)`（`↑`/`↓` 只是参数，字形走查一份不改）；`View()` 在 `Hidden() > 0 || offset > 0` 时把 body 第一行交给 `arrowLine` 画 `↑`（O(1) 显示条件，不做要每帧多折行一次整段 transcript 的 `offset < maxOffset()` 判定；body 只有一行时 `↓` 后画、点击先判 `downArrowAt`，回最新那条路拥有最后发言权）；`click()` 拦截 `upArrowAt`（`y == 0 && x == width-1`，与下箭头上下对称、与渲染同一套算术）走 `jumpToOldest`：按 `revealChunkSpans` 循环 `Reveal` 直到 `Hidden() == 0`，再 `offset = maxOffset()` 置顶、`sel.clear()`。测试：`window_test.go`（155 → 205 行）四条按新语义改写（初始窗口 = 最近一条回答、`Ctrl+Home` 揭示一块、滚动连续性改用折行超过 body 的长回答——单行窗口没有 offset 可滚）并新增两条 `TrimAnswer`（回答之后的提示留在窗口里、没有回答时全留）；新增 `up_arrow_test.go`（113 行六条：有历史未揭示时画、滚离第一行时画、停在最新处不画、点击后全揭示且置顶且首行是第一条消息、无隐藏历史时点击同样置顶、点击旁边一格不触发）；`down_arrow_test.go` 两处调用点随改名；`composer_frame_test.go` 的 `TestTheScreenIsPaintedFromEdgeToEdge` 加箭头格例外（箭头坐在抬升面上，逐格着色不变式仍成立，只是那一格是表面色）。文档：本文件第 3 节 `tui` 标题行数（5489 + 5559 → 5522 + 5733）与 `transcript.go` / `model.go` 两行、第 8 节第 105 条改写与新增第 107 条；`docs/INDEX.md` 与 `README.md` 同步，版本升到 0.12.27 |
+| 2026-11-17 | 桌面界面换成按 dexon 设计语言重写的前端（不升版本）。**前端**：新增 `go/web/`（Vite + React 19 + TypeScript，无 UI 框架依赖，只有 `react-markdown` 与 `remark-gfm`）——`src/styles/tokens.css` 直接取自 dexon 的设计 token（`--fx-*` 语义色、shadow/radius/space 三套 recipe、`--text-*` 阶梯、`--type-scale` 阅读缩放），浅色 `:root` 与深色 `html.dark` 成对定义；布局分四张表：`shell.css`（外壳与侧边栏）、`chat.css`（阅读列、工具卡、输入框、审批卡）、`panels.css`（文件抽屉与设置面板）、`markdown.css`。三条界面判断写进注释：回答不套气泡（模型的段落更适合直接排在画布上），提问才是引文（读者的原话值得一个容器），工具调用折成卡片（一轮八次调用会把答案埋在自己的工作过程下）。`src/lib/fold.ts` 在浏览器侧重新实现 `internal/transcript` 的角色划分（user/answer/thinking/tool/notice/error），因为流式渲染需要边到边折叠；`src/lib/useStream.ts` 只持有一个 `EventSource`，重连交给浏览器、错过的状态由 `/api/state` 补齐。**后端**：新增 `internal/httpapi/host.go`（`Host` 接口 + 12 条路由：会话列表与 open/new/archive/restore/delete、模型目录与切换、推理强度、用量、目录与文件），接口而不是 import 的理由与 `Turn` 同源；新增 `internal/webhost/`（唯一同时持有 `assembly` 与 `httpapi` 的适配器，`SessionInfo`/`ModelList`/`Stats` 逐字段翻译，文件读取以 `confine` 归一到工作目录内——越界的写法被归一化回根内而不是报错，前端因此不必推理哪些路径被拒）；新增 `internal/httpapi/web/`（`//go:embed all:dist`，产物提交入库，所以 `go build` 不依赖 node，`index.html` 走 `no-cache`、带哈希的 `assets/` 走 `immutable`）。删掉 `internal/httpapi/page.go` 的内联页面：它是骨架的证明，替换它就是它注释里写的那个后续。`desktop/main.go` 注入 `webhost.New(kernel)`。闸门：`tests/httpapi/run.sh` 放行 `httpapi/web` 并写明它不是一层，新增 `tests/webhost/run.sh`（断言直接导入集而非依赖闭包——闭包是整个内核，断言它等于没断言）。测试：`approval_test.go` 与 `httpapi_test.go` 里两条"页面里有这个元素"的断言改成读构建产物（文档必须不自带远程引用，路由调用留给 bundle），`webhost_test.go` 钉住 `confine` 的归一化与 `isBinary` |

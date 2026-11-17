@@ -6,12 +6,14 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
+	"pi-go/internal/httpapi/web"
 	"pi-go/internal/wire"
 )
 
@@ -266,6 +268,9 @@ func TestAForeignOriginIsRefused(t *testing.T) {
 func TestThePageCarriesNoScriptFromElsewhere(t *testing.T) {
 	// A local page that loads a remote script would hand the origin to someone
 	// else, and this origin can run tools.
+	//
+	// The document is what must stay local; the route assertion moved to the
+	// bundle, because the built app is where the calls live now.
 	server := New(Options{})
 	httpServer := httptest.NewServer(server.Handler())
 	defer httpServer.Close()
@@ -283,8 +288,34 @@ func TestThePageCarriesNoScriptFromElsewhere(t *testing.T) {
 	if strings.Contains(text, "src=\"http") || strings.Contains(text, "href=\"http") {
 		t.Fatal("the page references a remote origin")
 	}
-	if !strings.Contains(text, "/api/events") || !strings.Contains(text, "/api/ask") {
-		t.Fatal("the page does not talk to the routes it is served with")
+
+	assets, err := fs.Glob(web.Assets(), "assets/*")
+	if err != nil {
+		t.Fatalf("glob assets: %v", err)
+	}
+	if len(assets) == 0 {
+		t.Fatal("the build has no assets")
+	}
+	joined := ""
+	for _, name := range assets {
+		if strings.HasSuffix(name, ".map") {
+			continue
+		}
+		chunk, err := fs.ReadFile(web.Assets(), name)
+		if err != nil {
+			t.Fatalf("read %s: %v", name, err)
+		}
+		joined += string(chunk)
+	}
+	if strings.Contains(joined, "http://") || strings.Contains(joined, "https://") {
+		// A bundle may legitimately carry a URL in a comment or a docs link, so
+		// this only fails when one is loaded as a resource.
+		if strings.Contains(joined, "src=\"http") || strings.Contains(joined, "href=\"http") {
+			t.Fatal("the bundle loads a remote resource")
+		}
+	}
+	if !strings.Contains(joined, "/api/events") || !strings.Contains(joined, "/api/ask") {
+		t.Fatal("the bundle does not talk to the routes it is served with")
 	}
 }
 

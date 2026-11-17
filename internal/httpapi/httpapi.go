@@ -31,6 +31,7 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"pi-go/internal/httpapi/web"
 	"pi-go/internal/wire"
 )
 
@@ -59,15 +60,28 @@ type Options struct {
 
 	// Facts is echoed to every new subscriber. Empty fields are omitted.
 	Facts Facts
+
+	// Host adds the routes a full window needs. Without it the server answers
+	// only the single-conversation surface, which is what a test or the
+	// -offline shell wants.
+	Host Host
+
+	// Picker adds the native folder chooser. Only a desktop shell has one; a
+	// browser build leaves it nil and the route answers 501, which is the
+	// signal the page uses to offer a path field instead.
+	Picker Picker
 }
 
 // Server is a loopback HTTP endpoint for one conversation.
 type Server struct {
-	turn  Turn
-	facts Facts
+	turn   Turn
+	facts  Facts
+	host   Host
+	picker Picker
 
-	broker *broker
-	mux    *http.ServeMux
+	broker    *broker
+	approvals *approvals
+	mux       *http.ServeMux
 
 	// running is the single-turn latch. One conversation has one turn in
 	// flight; a second POST while one runs is refused instead of queued,
@@ -85,15 +99,25 @@ type Server struct {
 // New builds a server. It does not listen; see Listen.
 func New(options Options) *Server {
 	server := &Server{
-		turn:   options.Turn,
-		facts:  options.Facts,
-		broker: newBroker(),
+		turn:      options.Turn,
+		facts:     options.Facts,
+		host:      options.Host,
+		picker:    options.Picker,
+		broker:    newBroker(),
+		approvals: newApprovals(),
 	}
 	server.mux = http.NewServeMux()
-	server.mux.HandleFunc("GET /{$}", server.servePage)
+	// One root pattern rather than an exact "/": the page owns its own assets
+	// and its own deep links, and every /api route below is more specific, so
+	// ServeMux still sends them to their handlers.
+	server.mux.Handle("GET /", web.Handler())
 	server.mux.HandleFunc("GET /api/state", server.serveState)
 	server.mux.HandleFunc("GET /api/events", server.serveEvents)
 	server.mux.HandleFunc("POST /api/ask", server.serveAsk)
+	server.mux.HandleFunc("POST /api/approval", server.serveApproval)
+	if options.Host != nil {
+		server.mountHost()
+	}
 	return server
 }
 
@@ -163,6 +187,9 @@ func (s *Server) Close() error {
 	s.mu.Unlock()
 
 	s.broker.close()
+	// A question still open means a turn parked on the tool goroutine. Denying
+	// it here is what lets that turn finish instead of outliving the window.
+	s.approvals.close()
 	if server == nil {
 		return nil
 	}
@@ -221,12 +248,29 @@ func loopbackName(host string) bool {
 }
 
 // serveState answers what a page cannot know after a reload: whether a turn is
-// already running, and which facts belong to this server.
+// already running, which facts belong to this server, and which approval boxes
+// should be on screen. The last one is why a reload mid-approval is survivable:
+// the question is still open on the tool goroutine, and only the id was lost.
 func (s *Server) serveState(w http.ResponseWriter, r *http.Request) {
+	pendingQuestions := s.approvals.list()
+	waiting := make([]struct {
+		ID string `json:"id"`
+		Question
+	}, 0, len(pendingQuestions))
+	for _, item := range pendingQuestions {
+		waiting = append(waiting, struct {
+			ID string `json:"id"`
+			Question
+		}{ID: item.id, Question: item.Question})
+	}
 	state := struct {
 		Facts
 		Running bool `json:"running"`
-	}{Facts: s.facts, Running: s.running.Load()}
+		Pending []struct {
+			ID string `json:"id"`
+			Question
+		} `json:"pending,omitempty"`
+	}{Facts: s.facts, Running: s.running.Load(), Pending: waiting}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	_ = json.NewEncoder(w).Encode(state)
 }

@@ -208,6 +208,11 @@ func New(ctx context.Context, o Options) (*Kernel, []string, error) {
 		FitThinking:    ThinkingFitter(cfg),
 		BeforeToolCall: gate.BeforeToolCall,
 		GoalBudget:     o.goalBudget(cfg),
+		// Where a conversation started in another project belongs. The same
+		// resolution the startup session used, asked again per directory: the
+		// default layout answers a bucket per project, a configured store
+		// answers itself.
+		SessionDir: func(cwd string) (string, error) { return SessionDir(o, cfg, cwd) },
 	}, manager)
 	if err != nil {
 		if servers != nil {

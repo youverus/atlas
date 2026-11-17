@@ -56,8 +56,10 @@ func TestSessionCommandsThatEmptyTheSessionLandOnTheHomePage(t *testing.T) {
 		command string
 		flash   string // what the page has to say; empty means nothing at all
 	}{
-		{"/archive", "archived: session "}, // plus the id prefix, checked below
-		{"/delete", "deleted: session "},
+		// The label is the name the conversation gave itself from its first
+		// message, the same one a menu row shows.
+		{"/archive", "archived: hello"},
+		{"/delete", "deleted: hello"},
 		{"/new", ""},
 	} {
 		cwd, dir := t.TempDir(), t.TempDir()
@@ -107,7 +109,7 @@ func TestSessionCommandsThatEmptyTheSessionLandOnTheHomePage(t *testing.T) {
 		if len(recorder.flashes) != 1 {
 			t.Fatalf("%s said %q on the page, want one line", tc.command, recorder.flashes)
 		}
-		if want := tc.flash + id[:8]; !strings.HasPrefix(recorder.flashes[0], want) {
+		if want := tc.flash; !strings.HasPrefix(recorder.flashes[0], want) {
 			t.Fatalf("%s said %q on the page, want it to open with %q", tc.command, recorder.flashes[0], want)
 		}
 	}

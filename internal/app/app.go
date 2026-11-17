@@ -83,6 +83,14 @@ func StaticTools(set []tool.Tool) ToolSet {
 	return func(string) []tool.Tool { return set }
 }
 
+// SessionDirFunc names the store a directory's sessions live in.
+//
+// It is a function of the directory because the store usually is: the default
+// layout keeps one folder per project, so a conversation started in another
+// project belongs beside that project's others. A store configured by path
+// answers the same path everywhere, which is the other legal shape.
+type SessionDirFunc func(cwd string) (string, error)
+
 // PromptReload says what a reload found.
 type PromptReload struct {
 	// Changed is true when the instructions differ from the ones in effect.
@@ -160,6 +168,12 @@ type Config struct {
 	// another project brings that project's tools with it.
 	Tools ToolSet
 
+	// SessionDir names the store for a directory. It is asked when a
+	// conversation is started somewhere other than where this one runs;
+	// opening an existing file keeps that file where it is. Nil means the
+	// pi-style default under the agent home, which is a bucket per project.
+	SessionDir SessionDirFunc
+
 	// Resolver rebuilds a model from a name pair. Required to switch models and
 	// to adopt the model a resumed session recorded.
 	Resolver Resolver
@@ -212,6 +226,10 @@ type App struct {
 	// themselves: the answer changes with the session, and a slice captured at
 	// startup would describe the directory this process started in forever.
 	tools ToolSet
+
+	// sessionDir names the store a conversation started in another directory
+	// belongs to. Nil means the pi-style default under the agent home.
+	sessionDir SessionDirFunc
 
 	execution   agent.ToolExecution
 	maxParallel int
@@ -273,6 +291,7 @@ func New(cfg Config, manager *session.Manager) (*App, error) {
 		models:       cloneModels(cfg.Models),
 		fitThinking:  cfg.FitThinking,
 		tools:        cfg.Tools,
+		sessionDir:   cfg.SessionDir,
 		execution:    cfg.ToolExecution,
 		maxParallel:  cfg.MaxParallel,
 		before:       cfg.BeforeToolCall,
