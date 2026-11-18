@@ -7,6 +7,7 @@ package transcript
 // keeps its own copies for the inline interface, which is deleted.
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -78,6 +79,22 @@ func compactJSON(raw json.RawMessage, limit int) string {
 		return ""
 	}
 	return truncate(strings.Join(strings.Fields(string(raw)), " "), limit)
+}
+
+// indentJSON re-renders a recorded argument object as something a reader can
+// scan. The wire keeps arguments as one line of JSON, and one line of JSON is
+// the one shape nobody reads. Text that is not JSON is returned as it stands,
+// because a tool taking a plain string should not be shown in quotes.
+func indentJSON(raw json.RawMessage, limit int) string {
+	text := strings.TrimSpace(string(raw))
+	if text == "" {
+		return ""
+	}
+	var out bytes.Buffer
+	if err := json.Indent(&out, []byte(text), "", "  "); err != nil {
+		return truncate(text, limit)
+	}
+	return truncate(out.String(), limit)
 }
 
 // resultTexts extracts the text of a tool result. The payload is the kernel's

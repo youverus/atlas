@@ -125,6 +125,8 @@ type TranscriptBlock struct {
 	Text   string `json:"text,omitempty"`
 	Note   string `json:"note,omitempty"`
 	Detail string `json:"detail,omitempty"`
+	Args   string `json:"args,omitempty"`
+	Result string `json:"result,omitempty"`
 	ID     string `json:"id,omitempty"`
 }
 

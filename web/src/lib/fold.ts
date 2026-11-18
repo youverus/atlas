@@ -22,7 +22,10 @@ export interface Block {
   note?: string;
   /** Shown when open; replaced by the result when it lands. */
   progress?: string;
-  detail?: string;
+  /** The call's arguments in full, for the card a reader opens. */
+  args?: string;
+  /** What the call returned, in full. */
+  result?: string;
   callId?: string;
   open: boolean;
   error?: boolean;
@@ -33,6 +36,11 @@ let nextId = 1;
 export function blank(role: Role, init: Partial<Block> = {}): Block {
   return { id: nextId++, role, text: "", open: false, ...init };
 }
+
+// What a card carries when it opens. A tool that read a megabyte is not one the
+// page should hold: the drawer is where a whole file belongs.
+const ARGS_LIMIT = 4000;
+const RESULT_LIMIT = 20000;
 
 /** trim keeps a JSON preview to one readable line. */
 function trim(value: unknown, limit = 120): string {
@@ -46,6 +54,45 @@ function trim(value: unknown, limit = 120): string {
   if (!text) return "";
   return text.length > limit ? `${text.slice(0, limit)}…` : text;
 }
+
+/** expand keeps the body a reader opened the card for: JSON with its newlines,
+ *  not the one line that is exactly what the preview already said. */
+function expand(value: unknown, limit: number): string {
+  if (value === undefined || value === null) return "";
+  let text: string;
+  if (typeof value === "string") {
+    text = value;
+  } else {
+    try {
+      text = JSON.stringify(value, null, 2);
+    } catch {
+      text = String(value);
+    }
+  }
+  return text.length > limit ? `${text.slice(0, limit)}…` : text;
+}
+
+/** resultText unwraps a tool result the way the kernel's own fold does. The
+ *  live event carries the whole `tool.Result` envelope (`content` blocks plus
+ *  details), and printing the envelope would show a reader JSON around the one
+ *  sentence the tool actually said. */
+function resultText(value: unknown): string {
+  if (value !== null && typeof value === "object" && "content" in value) {
+    const content = (value as { content?: unknown }).content;
+    if (Array.isArray(content)) {
+      const texts = content
+        .map((part) =>
+          part !== null && typeof part === "object" && "text" in part
+            ? String((part as { text?: unknown }).text ?? "")
+            : "",
+        )
+        .filter((text) => text.length > 0);
+      if (texts.length > 0) return expand(texts.join("\n"), RESULT_LIMIT);
+    }
+  }
+  return expand(value, RESULT_LIMIT);
+}
+
 
 function closeOpen(blocks: Block[]): Block[] {
   return blocks.map((block) => (block.open ? { ...block, open: false } : block));
@@ -128,6 +175,7 @@ export function apply(blocks: Block[], event: AgentEvent): FoldResult {
         name: event.toolName ?? "tool",
         callId: event.toolCallId,
         note: trim(event.args),
+        args: expand(event.args, ARGS_LIMIT),
       });
       return { blocks: next };
     }
@@ -149,7 +197,7 @@ export function apply(blocks: Block[], event: AgentEvent): FoldResult {
           name: event.toolName ?? "tool",
           note,
           error: event.isError,
-          detail: event.isError ? trim(event.result, 2000) : "",
+          result: resultText(event.result),
         });
         return { blocks: [...blocks, block] };
       }
@@ -159,7 +207,7 @@ export function apply(blocks: Block[], event: AgentEvent): FoldResult {
           progress: undefined,
           note,
           error: event.isError,
-          detail: event.isError ? trim(event.result, 2000) : "",
+          result: resultText(event.result),
         }),
       };
     }
@@ -218,7 +266,8 @@ export function replay(items: TranscriptBlock[]): Block[] {
       name: item.name,
       text: item.text ?? "",
       note: item.note,
-      detail: item.detail,
+      args: item.args,
+      result: item.result,
       callId: item.id,
       error: role === "error" || (role === "tool" && item.note?.includes("failed") === true),
     });

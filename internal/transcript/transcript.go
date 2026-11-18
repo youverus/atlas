@@ -82,6 +82,14 @@ type Block struct {
 	// Detail is shown only when a call failed, because that is the one result a
 	// reader has to act on.
 	Detail string
+	// Args is the call's arguments in full, for a reader who asks to see them.
+	// The terminal draws Note's preview and never this: a card that opens is a
+	// different medium from a transcript that scrolls.
+	Args string
+	// Result is what the call returned, in full, for the same reason. Detail
+	// stays the failure-only excerpt the terminal prints, so a successful call
+	// costs the terminal nothing.
+	Result string
 	// ID is the tool call this block belongs to.
 	ID string
 	// Open marks a block that is still being written.

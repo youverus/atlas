@@ -41,6 +41,8 @@ export interface TranscriptBlock {
   text?: string;
   note?: string;
   detail?: string;
+  args?: string;
+  result?: string;
   id?: string;
 }
 

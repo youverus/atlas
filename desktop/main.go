@@ -40,7 +40,7 @@ import (
 // It is a var, not a const, so scripts/package.sh can stamp the release version
 // with -ldflags -X main.version=... and have the page, the facts and the app
 // bundle's Info.plist agree; -X cannot write to a const.
-var version = "0.2.0"
+var version = "0.2.1"
 
 func main() {
 	configPath := flag.String("config", "", "config file (default ~/.atlas/config.json)")

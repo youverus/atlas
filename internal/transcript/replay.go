@@ -6,6 +6,14 @@ import (
 	"pi-go/internal/wire"
 )
 
+// How much of a call the window carries for its card to open. A tool that read
+// a megabyte is not one the page should hold in the DOM; the file drawer is
+// where a whole file belongs. The terminal never reads these two fields.
+const (
+	argsLimit   = 4000
+	resultLimit = 20000
+)
+
 // Replay rebuilds the blocks a recorded conversation would have produced live.
 //
 // A session file is the only place a past conversation exists, so a window that
@@ -110,9 +118,12 @@ func replayAssistant(blocks []Block, message wire.Message, results map[string]wi
 }
 
 // replayCall draws one call as the single line the live renderer left behind:
-// what ran, with what arguments, and what came back.
+// what ran, with what arguments, and what came back. The line is the claim; the
+// arguments and the result are what a reader opens the card to read, and they
+// are carried in full because a preview is exactly what a card already shows.
 func replayCall(call wire.Content, results map[string]wire.Message) Block {
 	note := compactJSON(call.Arguments, 120)
+	args := indentJSON(call.Arguments, argsLimit)
 	result, ok := results[call.ID]
 	if !ok {
 		// A call with no recorded result was cut off mid-flight. Saying so
@@ -122,6 +133,7 @@ func replayCall(call wire.Content, results map[string]wire.Message) Block {
 			Name: call.Name,
 			ID:   call.ID,
 			Note: joinNote(note, "no result"),
+			Args: args,
 		}
 	}
 	outcome := "done"
@@ -129,10 +141,12 @@ func replayCall(call wire.Content, results map[string]wire.Message) Block {
 		outcome = "failed"
 	}
 	block := Block{
-		Role: RoleTool,
-		Name: call.Name,
-		ID:   call.ID,
-		Note: joinNote(note, outcome),
+		Role:   RoleTool,
+		Name:   call.Name,
+		ID:     call.ID,
+		Note:   joinNote(note, outcome),
+		Args:   args,
+		Result: truncate(result.Text(), resultLimit),
 	}
 	if result.IsErrorResult() {
 		block.Detail = truncate(result.Text(), 2000)
@@ -152,10 +166,11 @@ func replayOrphanResult(message wire.Message) Block {
 		outcome = "failed"
 	}
 	block := Block{
-		Role: RoleTool,
-		Name: name,
-		ID:   message.ToolCallID,
-		Note: outcome,
+		Role:   RoleTool,
+		Name:   name,
+		ID:     message.ToolCallID,
+		Note:   outcome,
+		Result: truncate(message.Text(), resultLimit),
 	}
 	if message.IsErrorResult() {
 		block.Detail = truncate(message.Text(), 2000)

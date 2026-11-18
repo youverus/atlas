@@ -204,6 +204,20 @@
   overflow: auto;
 }
 
+/* Two sections, each with its own scroll: arguments are short and the result
+   can be a file, so one shared scrollbar would push the arguments out of sight
+   to read the end of the other. */
+.tool__section + .tool__section {
+  margin-top: var(--space-2);
+}
+
+.tool__label {
+  display: block;
+  margin-bottom: var(--space-1);
+  font-size: var(--text-micro);
+  color: var(--fx-text-tertiary);
+}
+
 /* ---------- notice / error ---------- */
 
 .notice {

@@ -24,7 +24,7 @@ func (h *transcriptHost) Transcript() ([]TranscriptBlock, error) {
 func TestServeSessionTranscriptReplaysTheConversation(t *testing.T) {
 	host := &transcriptHost{blocks: []TranscriptBlock{
 		{Role: "user", Text: "why"},
-		{Role: "tool", Name: "read", Note: "done", ID: "c1"},
+		{Role: "tool", Name: "read", Note: "done", ID: "c1", Args: "{\n  \"path\": \"a.go\"\n}", Result: "package a"},
 	}}
 	server := projectServer(t, host, nil)
 	defer server.Close()
@@ -43,6 +43,11 @@ func TestServeSessionTranscriptReplaysTheConversation(t *testing.T) {
 	}
 	if len(blocks) != 2 || blocks[0].Role != "user" || blocks[1].Name != "read" {
 		t.Fatalf("blocks = %+v, want the replayed conversation", blocks)
+	}
+	// A card that opens needs the call itself on the wire, not just the line:
+	// without these two a replayed tool card has nothing to show.
+	if blocks[1].Args != "{\n  \"path\": \"a.go\"\n}" || blocks[1].Result != "package a" {
+		t.Fatalf("tool block = %+v, want the arguments and the result carried through", blocks[1])
 	}
 }
 

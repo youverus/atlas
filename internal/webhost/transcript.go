@@ -21,6 +21,8 @@ func (h *Host) Transcript() ([]httpapi.TranscriptBlock, error) {
 			Text:   block.Text,
 			Note:   block.Note,
 			Detail: block.Detail,
+			Args:   block.Args,
+			Result: block.Result,
 			ID:     block.ID,
 		})
 	}

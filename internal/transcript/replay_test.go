@@ -46,6 +46,17 @@ func TestReplayFoldsCallsAndResultsIntoOneLine(t *testing.T) {
 	if blocks[2].Note != `{"path":"."} · done` {
 		t.Fatalf("note = %q, want the arguments and the outcome", blocks[2].Note)
 	}
+	// The card opens onto the whole call: the note is the preview, these are
+	// what a reader clicks for.
+	if blocks[2].Args != "{\n  \"path\": \".\"\n}" {
+		t.Fatalf("args = %q, want the indented arguments", blocks[2].Args)
+	}
+	if blocks[2].Result != "a.go" {
+		t.Fatalf("result = %q, want the output of a successful call", blocks[2].Result)
+	}
+	if blocks[2].Detail != "" {
+		t.Fatalf("detail = %q, want the terminal's failure excerpt left empty", blocks[2].Detail)
+	}
 	if blocks[3].Role != RoleAnswer || blocks[3].Text != "two files" {
 		t.Fatalf("final answer = %+v", blocks[3])
 	}
