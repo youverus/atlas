@@ -581,6 +581,12 @@ type Provider struct {
 	// set and non-empty.
 	APIKeyEnv string `json:"apiKeyEnv"`
 
+	// UserAgent is the client identifier sent to this endpoint. Empty sends
+	// net/http's own, so a config that does not care says nothing about this
+	// binary. A model declaration may override it, which is what one gateway
+	// serving several vendors under a single key needs.
+	UserAgent string `json:"userAgent"`
+
 	// Models declares what this endpoint serves. At least one is required: a
 	// provider that serves nothing is a typo, not a configuration.
 	Models []Model `json:"models"`
@@ -701,6 +707,11 @@ type Model struct {
 	// undeclared, and an adapter then assumes images can travel rather than
 	// dropping them silently.
 	Input []string `json:"input"`
+
+	// UserAgent overrides the provider's client identifier for this model. A
+	// gateway that routes several vendors under one key can serve a model whose
+	// endpoint expects a different identifier than the endpoint's default.
+	UserAgent string `json:"userAgent"`
 }
 
 // Gears returns the thinking levels this model offers, in canonical order: off

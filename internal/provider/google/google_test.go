@@ -163,6 +163,26 @@ func TestEndpointAndHeaders(t *testing.T) {
 	}
 }
 
+// TestUserAgentFollowsTheDeclaration covers both halves of the choice: a
+// declared identifier travels verbatim, and an empty one leaves net/http's own
+// header rather than a made-up one.
+func TestUserAgentFollowsTheDeclaration(t *testing.T) {
+	server := sseServer(t, "text.sse")
+	request := messageRequest(wire.UserMessage("hi"))
+	request.Model.UserAgent = "declared/1.2.3"
+	collect(t, providerFor(server), request)
+
+	if got := server.last(t).header.Get("User-Agent"); got != "declared/1.2.3" {
+		t.Fatalf("User-Agent: got %q; want declared/1.2.3", got)
+	}
+
+	plain := sseServer(t, "text.sse")
+	collect(t, providerFor(plain), messageRequest(wire.UserMessage("hi")))
+	if got := plain.last(t).header.Get("User-Agent"); got != "Go-http-client/1.1" {
+		t.Fatalf("User-Agent with no declaration: got %q; want net/http's own", got)
+	}
+}
+
 // TestTextStream assembles the plain answer and reads the usage counters, where
 // the prompt total includes the cached part.
 func TestTextStream(t *testing.T) {

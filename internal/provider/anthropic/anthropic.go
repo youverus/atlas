@@ -98,6 +98,12 @@ func (p *Provider) Stream(ctx context.Context, req provider.Request) (provider.S
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Accept", "text/event-stream")
+	// The declaration decides what this endpoint is told about its client. An
+	// empty value keeps net/http's own header, which is the only answer that
+	// says nothing about this binary.
+	if ua := req.Model.UserAgent; ua != "" {
+		httpReq.Header.Set("User-Agent", ua)
+	}
 	httpReq.Header.Set("anthropic-version", p.version())
 	// Anthropic uses x-api-key rather than a bearer token. An empty key is not
 	// rejected here: a proxy in front of the API may authenticate on its own.

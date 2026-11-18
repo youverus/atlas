@@ -40,7 +40,7 @@ import (
 
 // version is the CLI's own version. The window title quotes it, so it lives on
 // its own rather than inside the code that draws it.
-const version = "0.12.29"
+const version = "0.12.30"
 
 // spillDirName is the subdirectory of a session bucket where output too large
 // for a message is written. It sits beside the .jsonl files rather than in one

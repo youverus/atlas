@@ -59,6 +59,26 @@ func TestModelOfPrefersTheModelBaseURL(t *testing.T) {
 	}
 }
 
+// TestModelOfFoldsTheUserAgent covers the one endpoint that serves several
+// vendors under a single provider: the provider answers what the endpoint is
+// called, and a model declaration answers what its client is called.
+func TestModelOfFoldsTheUserAgent(t *testing.T) {
+	choice := selection()
+	if ua := ModelOf(choice).UserAgent; ua != "" {
+		t.Fatalf("userAgent with nothing declared = %q; want empty", ua)
+	}
+
+	choice.Provider.UserAgent = "endpoint/1.0"
+	if ua := ModelOf(choice).UserAgent; ua != "endpoint/1.0" {
+		t.Fatalf("provider userAgent = %q", ua)
+	}
+
+	choice.Model.UserAgent = "vendor/2.0"
+	if ua := ModelOf(choice).UserAgent; ua != "vendor/2.0" {
+		t.Fatalf("model userAgent = %q; want the model's override", ua)
+	}
+}
+
 func TestAdapterOfRoutesByAPI(t *testing.T) {
 	openaiSelection := selection()
 	adapter, err := adapterOf(openaiSelection)

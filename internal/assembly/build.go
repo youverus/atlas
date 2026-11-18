@@ -48,6 +48,7 @@ func ModelOf(selection config.Selection) wire.Model {
 		API:           selection.Provider.API,
 		Provider:      selection.ProviderName,
 		BaseURL:       EffectiveBaseURL(selection),
+		UserAgent:     EffectiveUserAgent(selection),
 		Reasoning:     declared.Reasoning,
 		ContextWindow: facts.ContextWindow,
 		MaxTokens:     facts.MaxTokens,
@@ -61,6 +62,16 @@ func EffectiveBaseURL(selection config.Selection) string {
 		return selection.Model.BaseURL
 	}
 	return selection.Provider.BaseURL
+}
+
+// EffectiveUserAgent is the client identifier a selection sends: the model's
+// override wins, the provider default fills the rest, and an empty answer
+// leaves net/http's own header in place.
+func EffectiveUserAgent(selection config.Selection) string {
+	if selection.Model.UserAgent != "" {
+		return selection.Model.UserAgent
+	}
+	return selection.Provider.UserAgent
 }
 
 // adapterOf builds the wire adapter and attaches the credential.
