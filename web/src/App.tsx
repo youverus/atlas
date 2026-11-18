@@ -37,11 +37,16 @@ export default function App() {
   const [files, setFiles] = useState(false);
   const [notice, setNotice] = useState("");
 
-  // The stream is appended to through a ref-held array as well as state, so a
-  // burst of deltas folds against the newest transcript instead of against the
-  // one captured when the handler was created.
+  // The transcript is written through a ref as well as state: a burst of deltas
+  // can be dispatched before React has re-rendered, and folding each one
+  // against the last committed array is what keeps the earlier deltas of the
+  // burst. Every write goes through commit, so the two never disagree; writing
+  // the ref during render instead would let a stale render move it backwards.
   const current = useRef<Block[]>([]);
-  current.current = blocks;
+  const commit = useCallback((next: Block[]) => {
+    current.current = next;
+    setBlocks(next);
+  }, []);
 
   // The rail is drawn per project, so one request answers "which conversations,
   // in which folder" instead of a flat list the page would have to sort itself.
@@ -99,16 +104,18 @@ export default function App() {
     onStatus: (status) => {
       setRunning(status.running);
       if (status.error) {
-        setBlocks(fold.notice(current.current, "error", status.error));
+        commit(fold.notice(current.current, "error", status.error));
       }
       if (!status.running) {
-        setBlocks(fold.settle(current.current));
+        commit(fold.settle(current.current));
         void refreshSessions();
       }
     },
     onAgent: (event) => {
-      const result = fold.apply(current.current, event);
-      setBlocks(result.blocks);
+      // The delta that opened this block may have arrived in the same burst as
+      // the one being folded now, so the fold starts from what was committed
+      // rather than from what was last rendered.
+      commit(fold.apply(current.current, event).blocks);
     },
     onApproval: (question) => {
       setApprovals((list) => (list.some((item) => item.id === question.id) ? list : [...list, question]));
@@ -116,7 +123,7 @@ export default function App() {
   });
 
   const send = async (text: string) => {
-    setBlocks(fold.prompt(current.current, text));
+    commit(fold.prompt(current.current, text));
     setRunning(true);
     setNotice("");
     try {
@@ -133,7 +140,7 @@ export default function App() {
       // The switch only moves the kernel; what the conversation holds comes
       // from a second question. Without it the page went blank, which reads as
       // "the history is gone" rather than "it has not been asked for yet".
-      setBlocks(fold.replay(await api.transcript()));
+      commit(fold.replay(await api.transcript()));
       setDraftDir("");
       await refreshSessions();
       setFacts(await api.state());
@@ -146,11 +153,11 @@ export default function App() {
   // window is reopened, so the first paint reads it back too.
   const loadTranscript = useCallback(async () => {
     try {
-      setBlocks(fold.replay(await api.transcript()));
+      commit(fold.replay(await api.transcript()));
     } catch {
-      setBlocks([]);
+      commit([]);
     }
-  }, []);
+  }, [commit]);
 
   // A conversation starts where the last one ran unless a project's own button
   // named a folder; either way the page then re-reads the rail, because a new
@@ -159,7 +166,7 @@ export default function App() {
     const dir = cwd ?? sessions.find((session) => session.current)?.cwd ?? draftDir;
     try {
       await api.newSession(cwd);
-      setBlocks([]);
+      commit([]);
       setDraftDir(dir);
       await refreshSessions();
       setFacts(await api.state());
