@@ -16,39 +16,24 @@ import (
 // lists and the prompt does not run.
 const permissionTrigger = "/permission"
 
-// The words a reader sees for the four postures. They are the reference
-// implementation's own labels — Ask, Auto, Full access, Off — because a user who
-// read its documentation should recognise the row without translating, and the
-// values underneath stay the config spelling ("default", "bypassPermissions").
+// permissionChoices is the shared vocabulary as menu rows, in the order the
+// config validates them so the menu and the error message agree.
 //
-// The two names that differ from their value are the two that need it: "default"
-// says nothing about what happens, and "bypassPermissions" is a sentence.
-var permissionLabels = map[string]struct{ label, note string }{
-	permission.ModeDefault: {"Ask", "ask before every change"},
-	permission.ModeAuto:    {"Auto", "ask the classifier, and the user when it cannot answer"},
-	permission.ModeBypass:  {"Full access", "no fallback ask; deny and ask rules still run"},
-	permission.ModeOff:     {"Off", "no rules, no checks, no ask"},
-}
-
-// permissionChoices is permissionLabels as menu rows, in the order the config
-// validates them so the menu and the error message agree.
+// The labels come from internal/permission because the window's settings sheet
+// shows the same four rows; one table means the two surfaces cannot name the
+// same posture differently.
 func permissionChoices() []tui.Choice {
 	out := make([]tui.Choice, 0, len(config.PermissionModes))
 	for _, mode := range config.PermissionModes {
-		named := permissionLabels[mode]
-		out = append(out, tui.Choice{Value: mode, Label: named.label, Note: named.note})
+		out = append(out, tui.Choice{Value: mode, Label: permission.Label(mode), Note: permission.Note(mode)})
 	}
 	return out
 }
 
 // permissionModeLabel is the short name for one mode, for the footer and for the
-// one-line report. An unknown value is returned as it is: a mode this build does
-// not know is a fact about the session, not something to hide behind "unknown".
+// one-line report. The words themselves live in internal/permission.
 func permissionModeLabel(mode string) string {
-	if named, ok := permissionLabels[mode]; ok {
-		return named.label
-	}
-	return mode
+	return permission.Label(mode)
 }
 
 // permissionCommand is /permission: bare asks, "status" reports, a mode name
@@ -125,7 +110,7 @@ func writePermissionStatus(state *sideState, out io.Writer) error {
 		if mode == current {
 			mark = "*"
 		}
-		fmt.Fprintf(out, "  %s %-11s %s\n", mark, permissionLabels[mode].label, permissionLabels[mode].note)
+		fmt.Fprintf(out, "  %s %-11s %s\n", mark, permission.Label(mode), permission.Note(mode))
 	}
 	return nil
 }

@@ -4,6 +4,7 @@ import {
   ApiError,
   type ModelList,
   type PendingQuestion,
+  type PermissionState,
   type ProjectGroup,
   type State,
 } from "./api";
@@ -32,6 +33,7 @@ export default function App() {
   const [draftDir, setDraftDir] = useState("");
   const [archived, setArchived] = useState(false);
   const [models, setModels] = useState<ModelList | null>(null);
+  const [permission, setPermission] = useState<PermissionState | null>(null);
   const [theme, setTheme] = useTheme();
   const [settings, setSettings] = useState(false);
   const [files, setFiles] = useState(false);
@@ -77,6 +79,17 @@ export default function App() {
     }
   }, []);
 
+  // The posture is fetched on its own rather than folded into the model list:
+  // the two are different questions, and a kernel with a gate but no models
+  // (or the reverse) has to be able to answer one of them.
+  const refreshPermission = useCallback(async () => {
+    try {
+      setPermission(await api.permission());
+    } catch {
+      setPermission(null);
+    }
+  }, []);
+
   useEffect(() => {
     let live = true;
     api
@@ -90,6 +103,7 @@ export default function App() {
       .catch(() => setNotice("无法读取服务状态"));
     void refreshSessions();
     void refreshModels();
+    void refreshPermission();
     void loadTranscript();
     return () => {
       live = false;
@@ -280,6 +294,11 @@ export default function App() {
           title={title}
           model={modelLabel}
           thinking={models?.thinking}
+          permission={
+            permission
+              ? { label: labelOf(permission), loud: permission.mode === "bypassPermissions" || permission.mode === "off" }
+              : undefined
+          }
           connected={connected}
           running={running}
           filesOpen={files}
@@ -320,6 +339,7 @@ export default function App() {
         onTheme={setTheme}
         onClose={() => setSettings(false)}
         onModelChanged={() => void refreshModels()}
+        onPermissionChanged={() => void refreshPermission()}
       />
     </div>
   );
@@ -328,4 +348,11 @@ export default function App() {
 function basename(path: string): string {
   const parts = path.replace(/\/+$/, "").split("/");
   return parts[parts.length - 1] || path;
+}
+
+// The reader-facing name of the posture in force. An unknown mode is printed as
+// it arrived: a posture this build cannot name is a fact about the kernel, not
+// something to hide behind "unknown".
+function labelOf(state: PermissionState): string {
+  return state.modes.find((mode) => mode.value === state.mode)?.label ?? state.mode;
 }

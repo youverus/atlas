@@ -5,6 +5,7 @@ export function TopBar({
   title,
   model,
   thinking,
+  permission,
   connected,
   running,
   filesOpen,
@@ -14,6 +15,7 @@ export function TopBar({
   title: string;
   model: string;
   thinking?: string;
+  permission?: { label: string; loud: boolean };
   connected: boolean;
   running: boolean;
   filesOpen: boolean;
@@ -29,6 +31,16 @@ export function TopBar({
           {model || "未配置模型"}
           {thinking ? ` · ${thinking}` : ""}
         </button>
+        {permission ? (
+          <button
+            type="button"
+            className={permission.loud ? "chip chip--button chip--warn" : "chip chip--button"}
+            onClick={onOpenSettings}
+            title="权限模式"
+          >
+            {permission.label}
+          </button>
+        ) : null}
         <span className="chip" title={connected ? "事件流已连接" : "事件流断开，正在重连"}>
           <span className={connected ? "dot" : "dot dot--off"} />
           {connected ? "在线" : "重连中"}

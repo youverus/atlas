@@ -14,14 +14,17 @@
 # folders kept beside the sessions rather than inside the kernel (session files
 # already carry their own folder, so the kernel has nothing to add), transcript
 # is the kernel's fold and the replay of a past conversation has to go through it
-# rather than through a second opinion held here, and config is the leaf that
-# answers where that list lives.
+# rather than through a second opinion held here, config is the leaf that answers
+# where that list lives, and permission is the leaf that holds the four postures
+# and the words for them — the window's switch has to reach the same engine the
+# terminal's /permission reaches, and the settings sheet has to draw the same four
+# names, so naming it here is the point rather than a leak.
 set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib.sh"
 cd "$TREE_ROOT"
 
 step "webhost: direct imports"
-allowed=(pi-go/internal/assembly pi-go/internal/config pi-go/internal/httpapi pi-go/internal/project pi-go/internal/session pi-go/internal/transcript)
+allowed=(pi-go/internal/assembly pi-go/internal/config pi-go/internal/httpapi pi-go/internal/permission pi-go/internal/project pi-go/internal/session pi-go/internal/transcript)
 imports="$(go list -f '{{join .Imports "\n"}}' ./internal/webhost)"
 while IFS= read -r dep; do
 	[[ -z $dep ]] && continue

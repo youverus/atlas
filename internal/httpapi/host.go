@@ -57,6 +57,12 @@ type Host interface {
 	// SetThinking switches the reasoning level used by later turns.
 	SetThinking(level string) error
 
+	// Permission is the gate's posture plus the words for all four modes.
+	Permission() (PermissionState, error)
+	// SetPermission switches the posture. It takes effect on the next tool
+	// call, because the ladder reads the mode every time it decides.
+	SetPermission(mode string) error
+
 	// Stats totals the session and reports the live context window.
 	Stats() (Stats, error)
 	// ReadDir lists one directory under the working directory.
@@ -152,6 +158,24 @@ type ModelList struct {
 	Models   []ModelOption `json:"models"`
 }
 
+// PermissionMode is one selectable posture. Value is the config spelling the
+// kernel accepts; Label and Note are the words the reader sees, sent from the
+// same table the terminal's /permission menu uses so the two surfaces cannot
+// name one posture differently.
+type PermissionMode struct {
+	Value string `json:"value"`
+	Label string `json:"label"`
+	Note  string `json:"note,omitempty"`
+}
+
+// PermissionState is the gate's posture plus the whole menu in one answer, for
+// the same reason ModelList carries the catalog: a sheet that opens with four
+// rows and no current one cannot draw its own selection.
+type PermissionState struct {
+	Mode  string           `json:"mode"`
+	Modes []PermissionMode `json:"modes"`
+}
+
 // Stats is the usage readout. Zero values mean "not counted", which is why the
 // context fields are separate: a session with no recorded usage still has a
 // window.
@@ -214,6 +238,8 @@ func (s *Server) mountHost() {
 	s.mux.HandleFunc("GET /api/models", s.serveModels)
 	s.mux.HandleFunc("POST /api/models", s.serveModelSet)
 	s.mux.HandleFunc("POST /api/thinking", s.serveThinkingSet)
+	s.mux.HandleFunc("GET /api/permission", s.servePermission)
+	s.mux.HandleFunc("POST /api/permission", s.servePermissionSet)
 	s.mux.HandleFunc("GET /api/stats", s.serveStats)
 	s.mux.HandleFunc("GET /api/files", s.serveFiles)
 	s.mux.HandleFunc("GET /api/file", s.serveFile)
@@ -509,6 +535,58 @@ func (s *Server) serveThinkingSet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, map[string]bool{"ok": true})
+}
+
+// servePermission reports the posture in force and the four rows a sheet draws.
+func (s *Server) servePermission(w http.ResponseWriter, r *http.Request) {
+	if !s.needHost(w) {
+		return
+	}
+	state, err := s.host.Permission()
+	if err != nil {
+		fail(w, err, http.StatusConflict)
+		return
+	}
+	if state.Modes == nil {
+		state.Modes = []PermissionMode{}
+	}
+	writeJSON(w, state)
+}
+
+// servePermissionSet switches the posture.
+//
+// The same shape as /api/thinking: one field, and a refusal carries a status
+// the sheet can show. An unknown mode is refused by the kernel rather than
+// quietly stored, because a typo that silently meant "ask" would look like the
+// switch did nothing.
+func (s *Server) servePermissionSet(w http.ResponseWriter, r *http.Request) {
+	if !s.needHost(w) {
+		return
+	}
+	var request struct {
+		Mode string `json:"mode"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&request); err != nil {
+		http.Error(w, "httpapi: bad request body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if request.Mode == "" {
+		http.Error(w, "httpapi: empty mode", http.StatusBadRequest)
+		return
+	}
+	if err := s.host.SetPermission(request.Mode); err != nil {
+		fail(w, err, http.StatusConflict)
+		return
+	}
+	state, err := s.host.Permission()
+	if err != nil {
+		fail(w, err, http.StatusConflict)
+		return
+	}
+	if state.Modes == nil {
+		state.Modes = []PermissionMode{}
+	}
+	writeJSON(w, state)
 }
 
 func (s *Server) serveStats(w http.ResponseWriter, r *http.Request) {

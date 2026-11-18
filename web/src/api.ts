@@ -78,6 +78,23 @@ export interface ModelList {
   models: ModelOption[];
 }
 
+/** One selectable permission posture. The label and note come from the server so
+ * the window and the terminal's /permission menu name the same posture the same
+ * way. */
+export interface PermissionMode {
+  value: string;
+  label: string;
+  note?: string;
+}
+
+/** The gate's posture plus the whole menu, for the same reason ModelList carries
+ * the catalog: a sheet with four rows and no current one cannot draw its own
+ * selection. */
+export interface PermissionState {
+  mode: string;
+  modes: PermissionMode[];
+}
+
 export interface Stats {
   sessionId?: string;
   sessionFile?: string;
@@ -224,6 +241,12 @@ export const api = {
   setModel: (provider: string, id: string) => post<void>("/api/models", { provider, id }),
 
   setThinking: (level: string) => post<void>("/api/thinking", { level }),
+
+  permission: () => call<PermissionState>("/api/permission"),
+
+  /** Switches the posture; the answer is the state that took effect, so the sheet
+   * never has to ask twice. */
+  setPermission: (mode: string) => post<PermissionState>("/api/permission", { mode }),
 
   stats: () => call<Stats>("/api/stats"),
 

@@ -18,6 +18,7 @@ import (
 	"pi-go/internal/assembly"
 	"pi-go/internal/config"
 	"pi-go/internal/httpapi"
+	"pi-go/internal/permission"
 	"pi-go/internal/project"
 	"pi-go/internal/session"
 )
@@ -160,6 +161,50 @@ func (h *Host) SetModel(provider, id string) error {
 // SetThinking switches the reasoning level used by later turns.
 func (h *Host) SetThinking(level string) error {
 	return h.kernel.App.SetThinkingLevel(level)
+}
+
+// Permission reports the gate's posture and the four rows that describe it.
+//
+// The rows are the terminal's own /permission menu, read from the same table in
+// internal/permission: the window shows "Full access" because the CLI shows
+// "Full access", not because a second list happened to be typed the same way.
+func (h *Host) Permission() (httpapi.PermissionState, error) {
+	engine := h.kernel.Gate.Engine()
+	if engine == nil {
+		return httpapi.PermissionState{}, fmt.Errorf("permission: this kernel has no permission engine")
+	}
+	// An engine built without a mode reports "", which is ModeDefault's own
+	// spelling. Sending "" would draw four rows and highlight none of them.
+	mode := engine.Mode()
+	if mode == "" {
+		mode = permission.ModeDefault
+	}
+	state := httpapi.PermissionState{
+		Mode:  mode,
+		Modes: make([]httpapi.PermissionMode, 0, len(config.PermissionModes)),
+	}
+	for _, value := range config.PermissionModes {
+		state.Modes = append(state.Modes, httpapi.PermissionMode{
+			Value: value,
+			Label: permission.Label(value),
+			Note:  permission.Note(value),
+		})
+	}
+	return state, nil
+}
+
+// SetPermission switches the posture for the rest of the process.
+//
+// It is the runtime half of the four modes and the same call /permission makes,
+// so a switch in the window takes effect on the next tool call in either front
+// end rather than on the next session. The kernel refuses an unknown name; that
+// refusal is passed on instead of being flattened into "nothing happened".
+func (h *Host) SetPermission(mode string) error {
+	engine := h.kernel.Gate.Engine()
+	if engine == nil {
+		return fmt.Errorf("permission: this kernel has no permission engine")
+	}
+	return engine.SetMode(mode)
 }
 
 // Stats totals the session.
