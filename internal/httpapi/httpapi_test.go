@@ -98,9 +98,9 @@ func TestATurnPublishesItsEventsToEverySubscriber(t *testing.T) {
 	// Two streams, because a window is not the only reader: a second window or
 	// a reloaded page must not steal events from the first.
 	release := make(chan struct{})
-	server := New(Options{Turn: func(ctx context.Context, prompt string, emit func(wire.AgentEvent) error) error {
+	server := New(Options{Turn: func(ctx context.Context, prompt string, emit func(wire.AgentEvent) error) (Receipt, error) {
 		<-release
-		return emit(wire.AgentEvent{Type: wire.AgentEventMessageEnd})
+		return Receipt{}, emit(wire.AgentEvent{Type: wire.AgentEventMessageEnd})
 	}})
 
 	first, firstReader, _ := openStream(t, server)
@@ -124,9 +124,9 @@ func TestATurnPublishesItsEventsToEverySubscriber(t *testing.T) {
 
 func TestStatusBracketsTheTurn(t *testing.T) {
 	release := make(chan struct{})
-	server := New(Options{Turn: func(ctx context.Context, prompt string, emit func(wire.AgentEvent) error) error {
+	server := New(Options{Turn: func(ctx context.Context, prompt string, emit func(wire.AgentEvent) error) (Receipt, error) {
 		<-release
-		return errors.New("provider exploded")
+		return Receipt{}, errors.New("provider exploded")
 	}})
 	httpServer, reader, _ := openStream(t, server)
 	readFrame(t, reader)
@@ -149,10 +149,66 @@ func TestStatusBracketsTheTurn(t *testing.T) {
 	}
 }
 
+// TestTheReceiptRidesOnTheClosingStatus: the window must learn what the turn
+// cost from the same frame that says it stopped. Sent as its own event, a
+// window would have to decide which of the two came first, and the answer would
+// differ depending on which one a slow reader lost.
+func TestTheReceiptRidesOnTheClosingStatus(t *testing.T) {
+	server := New(Options{Turn: func(context.Context, string, func(wire.AgentEvent) error) (Receipt, error) {
+		return Receipt{Fields: []string{"48 tokens (in 40, out 8)", "4.0 tok/s", "took 2.0s", "ended at 15:03:11"}}, nil
+	}})
+	httpServer, reader, cancel := openStream(t, server)
+	defer cancel()
+	readFrame(t, reader)
+
+	post(t, httpServer, "/api/ask", `{"prompt":"hi"}`, http.StatusAccepted)
+
+	var started statusEvent
+	if _, data := readFrame(t, reader); json.Unmarshal([]byte(data), &started) != nil {
+		t.Fatalf("decode start status: %s", data)
+	}
+	if len(started.Receipt) != 0 {
+		t.Fatalf("start receipt = %q, want none: nothing has been spent yet", started.Receipt)
+	}
+
+	var finished statusEvent
+	if _, data := readFrame(t, reader); json.Unmarshal([]byte(data), &finished) != nil {
+		t.Fatalf("decode end status: %s", data)
+	}
+	want := []string{"48 tokens (in 40, out 8)", "4.0 tok/s", "took 2.0s", "ended at 15:03:11"}
+	if len(finished.Receipt) != len(want) {
+		t.Fatalf("receipt = %q, want %q", finished.Receipt, want)
+	}
+	for index, field := range finished.Receipt {
+		if field != want[index] {
+			t.Fatalf("receipt[%d] = %q, want %q", index, field, want[index])
+		}
+	}
+}
+
+// TestATurnThatSpentNothingHasNoReceipt keeps an empty array off the wire: the
+// page decides "no line" from the absence of the field, and an empty array is
+// the same answer with more bytes.
+func TestATurnThatSpentNothingHasNoReceipt(t *testing.T) {
+	server := New(Options{Turn: func(context.Context, string, func(wire.AgentEvent) error) (Receipt, error) {
+		return Receipt{}, nil
+	}})
+	httpServer, reader, cancel := openStream(t, server)
+	defer cancel()
+	readFrame(t, reader)
+
+	post(t, httpServer, "/api/ask", `{"prompt":"hi"}`, http.StatusAccepted)
+	readFrame(t, reader)
+
+	if _, data := readFrame(t, reader); strings.Contains(data, "receipt") {
+		t.Fatalf("status frame carries a receipt: %s", data)
+	}
+}
+
 func TestAnEmptyPromptIsRefused(t *testing.T) {
-	server := New(Options{Turn: func(context.Context, string, func(wire.AgentEvent) error) error {
+	server := New(Options{Turn: func(context.Context, string, func(wire.AgentEvent) error) (Receipt, error) {
 		t.Error("the turn should not run")
-		return nil
+		return Receipt{}, nil
 	}})
 	httpServer := httptest.NewServer(server.Handler())
 	defer httpServer.Close()
@@ -164,9 +220,9 @@ func TestAnEmptyPromptIsRefused(t *testing.T) {
 
 func TestASecondAskIsRefusedWhileOneRuns(t *testing.T) {
 	release := make(chan struct{})
-	server := New(Options{Turn: func(ctx context.Context, prompt string, emit func(wire.AgentEvent) error) error {
+	server := New(Options{Turn: func(ctx context.Context, prompt string, emit func(wire.AgentEvent) error) (Receipt, error) {
 		<-release
-		return nil
+		return Receipt{}, nil
 	}})
 	httpServer := httptest.NewServer(server.Handler())
 	defer httpServer.Close()
@@ -192,14 +248,14 @@ func TestASlowReaderDoesNotStallTheTurn(t *testing.T) {
 	// freeze the model call.
 	const burst = streamBuffer * 2
 	done := make(chan error, 1)
-	server := New(Options{Turn: func(ctx context.Context, prompt string, emit func(wire.AgentEvent) error) error {
+	server := New(Options{Turn: func(ctx context.Context, prompt string, emit func(wire.AgentEvent) error) (Receipt, error) {
 		for range burst {
 			if err := emit(wire.AgentEvent{Type: wire.AgentEventMessageUpdate}); err != nil {
-				return err
+				return Receipt{}, err
 			}
 		}
 		done <- nil
-		return nil
+		return Receipt{}, nil
 	}})
 
 	// Subscribe directly so nothing drains the buffer.

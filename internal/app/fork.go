@@ -70,14 +70,18 @@ func (a *App) ForkSession() (string, error) {
 	return a.manager.ID(), nil
 }
 
-// ForkMessages returns every user message in the session with non-empty text,
-// in append order, so a caller can choose a point to fork before.
+// ForkMessages returns every user message on the active branch with non-empty
+// text, in the order it was said, so a caller can choose a point to fork before.
+//
+// The branch rather than the file: a session can hold entries the current leaf
+// does not descend from, and a message the conversation in view no longer
+// contains is not a place it can be branched.
 func (a *App) ForkMessages() []ForkMessage {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
 	out := make([]ForkMessage, 0)
-	for _, entry := range a.manager.Entries() {
+	for _, entry := range a.manager.Path("") {
 		if entry.Type != session.TypeMessage {
 			continue
 		}

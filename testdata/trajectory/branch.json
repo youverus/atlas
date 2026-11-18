@@ -1,0 +1,254 @@
+[
+  {
+    "index": 0,
+    "seq": 2,
+    "entryId": "e1",
+    "turn": 1,
+    "kind": "prompt",
+    "timestamp": "2026-11-18T12:00:01.000Z",
+    "text": "first question"
+  },
+  {
+    "index": 1,
+    "seq": 3,
+    "entryId": "e2",
+    "parentId": "e1",
+    "turn": 1,
+    "kind": "assistant",
+    "timestamp": "2026-11-18T12:00:02.000Z",
+    "durationMs": 2100,
+    "thinking": "the file is probably stale",
+    "model": "anthropic/claude-x",
+    "usage": {
+      "input": 1200,
+      "output": 40,
+      "cacheRead": 900,
+      "cacheWrite": 0,
+      "totalTokens": 1240,
+      "cost": {
+        "input": 0.001,
+        "output": 0.002,
+        "cacheRead": 0.0001,
+        "cacheWrite": 0,
+        "total": 0.0031
+      }
+    }
+  },
+  {
+    "index": 2,
+    "seq": 3,
+    "entryId": "e2",
+    "parentId": "e1",
+    "turn": 1,
+    "kind": "tool",
+    "timestamp": "2026-11-18T12:00:02.000Z",
+    "durationMs": 37,
+    "isError": true,
+    "tool": "read",
+    "ref": "c1",
+    "args": "{\"path\":\"a.go\"}",
+    "result": "permission denied: the call reads outside the workspace. Do not retry or work around this call."
+  },
+  {
+    "index": 3,
+    "seq": 5,
+    "entryId": "e4",
+    "parentId": "e3",
+    "turn": 1,
+    "kind": "assistant",
+    "timestamp": "2026-11-18T12:00:04.000Z",
+    "durationMs": 1500,
+    "text": "I could not read it.\nTrying another path.",
+    "model": "anthropic/claude-x",
+    "usage": {
+      "input": 1400,
+      "output": 30,
+      "cacheRead": 1200,
+      "cacheWrite": 0,
+      "totalTokens": 1430,
+      "cost": {
+        "input": 0,
+        "output": 0,
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "total": 0.004
+      }
+    }
+  },
+  {
+    "index": 4,
+    "seq": 6,
+    "entryId": "e5",
+    "parentId": "e4",
+    "turn": 2,
+    "kind": "prompt",
+    "timestamp": "2026-11-18T12:00:05.000Z",
+    "text": "second question\n\u003cfile name=\"b.go\"\u003epackage b\u003c/file\u003e"
+  },
+  {
+    "index": 5,
+    "seq": 7,
+    "entryId": "e6",
+    "parentId": "e5",
+    "turn": 2,
+    "kind": "compaction",
+    "timestamp": "2026-11-18T12:00:06.000Z",
+    "ref": "e4",
+    "text": "the first exchange was summarized",
+    "usage": {
+      "input": 900,
+      "output": 200,
+      "cacheRead": 0,
+      "cacheWrite": 0,
+      "totalTokens": 1100,
+      "cost": {
+        "input": 0,
+        "output": 0,
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "total": 0.01
+      }
+    },
+    "tokensBefore": 48000
+  },
+  {
+    "index": 6,
+    "seq": 8,
+    "entryId": "e7",
+    "parentId": "e6",
+    "turn": 2,
+    "kind": "thinking_level_change",
+    "timestamp": "2026-11-18T12:00:07.000Z",
+    "text": "high"
+  },
+  {
+    "index": 7,
+    "seq": 9,
+    "entryId": "e8",
+    "parentId": "e7",
+    "turn": 2,
+    "kind": "model_change",
+    "timestamp": "2026-11-18T12:00:08.000Z",
+    "model": "openai/gpt-x"
+  },
+  {
+    "index": 8,
+    "seq": 10,
+    "entryId": "e9",
+    "parentId": "e8",
+    "turn": 2,
+    "kind": "label",
+    "timestamp": "2026-11-18T12:00:09.000Z",
+    "ref": "e5",
+    "text": "the turn that went wrong"
+  },
+  {
+    "index": 9,
+    "seq": 11,
+    "entryId": "e10",
+    "parentId": "e9",
+    "turn": 2,
+    "kind": "usage",
+    "timestamp": "2026-11-18T12:00:10.000Z",
+    "ref": "cache_warm",
+    "text": "warmed before the turn",
+    "model": "openai/gpt-x",
+    "usage": {
+      "input": 10,
+      "output": 0,
+      "cacheRead": 0,
+      "cacheWrite": 1400,
+      "totalTokens": 10,
+      "cost": {
+        "input": 0,
+        "output": 0,
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "total": 0
+      }
+    }
+  },
+  {
+    "index": 10,
+    "seq": 12,
+    "entryId": "e11",
+    "parentId": "e10",
+    "turn": 2,
+    "kind": "context_edit",
+    "timestamp": "2026-11-18T12:00:11.000Z",
+    "ref": "e1",
+    "text": "{\"role\":\"user\",\"content\":\"first question (edited)\",\"timestamp\":1763467201000}"
+  },
+  {
+    "index": 11,
+    "seq": 13,
+    "entryId": "e12",
+    "parentId": "e11",
+    "turn": 2,
+    "kind": "branch_summary",
+    "timestamp": "2026-11-18T12:00:12.000Z",
+    "ref": "e14",
+    "text": "the abandoned attempt read the wrong file"
+  },
+  {
+    "index": 12,
+    "seq": 16,
+    "entryId": "e15",
+    "parentId": "e12",
+    "turn": 2,
+    "kind": "assistant",
+    "timestamp": "2026-11-18T12:00:15.000Z",
+    "durationMs": 800,
+    "text": "third answer",
+    "model": "openai/gpt-x",
+    "usage": {
+      "input": 1600,
+      "output": 12,
+      "cacheRead": 1400,
+      "cacheWrite": 0,
+      "totalTokens": 1612,
+      "cost": {
+        "input": 0,
+        "output": 0,
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "total": 0.005
+      }
+    }
+  },
+  {
+    "index": 13,
+    "seq": 17,
+    "entryId": "e16",
+    "parentId": "e15",
+    "turn": 2,
+    "kind": "tool",
+    "timestamp": "2026-11-18T12:00:16.000Z",
+    "durationMs": 12,
+    "tool": "read",
+    "ref": "c9",
+    "result": "orphan output"
+  },
+  {
+    "index": 14,
+    "seq": 18,
+    "entryId": "e17",
+    "parentId": "e16",
+    "turn": 2,
+    "kind": "other",
+    "timestamp": "2026-11-18T12:00:17.000Z",
+    "ref": "custom",
+    "text": "{\"type\":\"custom\",\"id\":\"e17\",\"parentId\":\"e16\",\"timestamp\":\"2026-11-18T12:00:17.000Z\",\"customType\":\"run-state\",\"data\":{\"step\":2}}"
+  },
+  {
+    "index": 15,
+    "seq": 19,
+    "entryId": "e18",
+    "parentId": "e17",
+    "turn": 2,
+    "kind": "other",
+    "timestamp": "2026-11-18T12:00:18.000Z",
+    "ref": "bashExecution",
+    "text": "{\"role\":\"bashExecution\",\"command\":\"ls\",\"output\":\"a.go\",\"timestamp\":1763467218000,\"exitCode\":0}"
+  }
+]

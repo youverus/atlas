@@ -15,6 +15,16 @@
   grid-template-columns: minmax(0, 1fr) 320px;
 }
 
+/* 侧对话占第二列，主对话仍在左边。两根列同时开着时顺序是对话 → 侧对话 → 文件
+   抽屉，和 DOM 一致：侧对话说的是同一段会话的另一半，抽屉才是外面那层。 */
+.workspace[data-side="open"] {
+  grid-template-columns: minmax(0, 1fr) 360px;
+}
+
+.workspace[data-side="open"][data-drawer="open"] {
+  grid-template-columns: minmax(0, 1fr) 360px 320px;
+}
+
 .drawer {
   display: flex;
   flex-direction: column;
@@ -133,6 +143,86 @@
   tab-size: 2;
 }
 
+/* ---------- side conversation ---------- */
+
+/* 侧对话是第二个对话，不是第二个抽屉：它跑自己的 agent，所以它有自己的滚动
+   区和自己的输入框。头部的样式借用抽屉那一套——两块面板并排时长得一样比各自
+   有各的间距重要。 */
+.side {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  overflow: hidden;
+  border-left: 1px solid var(--fx-line-default);
+  background: var(--fx-surface-card);
+}
+
+.side__count {
+  flex: none;
+  font-family: var(--font-mono);
+  font-size: var(--text-micro);
+  color: var(--fx-text-faint);
+}
+
+.side__scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+
+.side__column {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-3);
+}
+
+/* 每一块单独成项，这样分隔线是它后面的一行而不是一个浮在块之间的元素。 */
+.side__item {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.side__empty {
+  margin: 0;
+  padding: var(--space-3);
+  font-size: var(--text-label);
+  line-height: 1.8;
+  color: var(--fx-text-tertiary);
+}
+
+.side__seam {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-top: var(--space-2);
+  font-size: var(--text-micro);
+  color: var(--fx-text-faint);
+}
+
+.side__seam-rule {
+  flex: 1;
+  height: 1px;
+  background: var(--fx-line-subtle);
+}
+
+.side__foot {
+  flex: none;
+  border-top: 1px solid var(--fx-line-default);
+}
+
+/* 输入框在窄栏里不需要阅读列那套左右留白：面板自己的 padding 已经把边留出来
+   了，再叠一层会让框比栏窄一圈。 */
+.side .composer {
+  padding: var(--space-2);
+}
+
+
+
 /* ---------- settings sheet ---------- */
 
 .sheet-backdrop {
@@ -179,21 +269,114 @@
   padding: var(--space-3) var(--space-4) var(--space-4);
 }
 
+/* A sheet that asks one question does not need the width of the settings sheet:
+   a 560px box around a single field reads as a form with something missing. */
+.sheet--narrow {
+  width: min(420px, 100%);
+}
+
+.sheet__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-1-5);
+}
+
 .field {
   margin-bottom: var(--space-4);
 }
 
 .field__label {
+  /* Also used as a <label>, which is inline by default. */
+  display: block;
   margin-bottom: var(--space-1-5);
   font-size: var(--text-label);
   font-weight: 500;
   color: var(--fx-text-secondary);
 }
 
+.field__input {
+  width: 100%;
+  height: 32px;
+  padding: 0 var(--space-2);
+  border: 1px solid var(--fx-line-default);
+  border-radius: var(--radius-control);
+  background: var(--fx-surface-inset);
+  color: var(--fx-text-primary);
+  font-size: var(--text-body);
+}
+
+.field__input:focus {
+  outline: none;
+  border-color: var(--fx-accent-blue-border);
+  box-shadow: 0 0 0 3px var(--fx-accent-blue-selection);
+}
+
 .field__hint {
   margin-top: var(--space-1);
   font-size: var(--text-micro);
   color: var(--fx-text-tertiary);
+}
+
+/* The fork points: one row per place a conversation can be branched, scrolled
+   inside a box rather than growing the sheet, because a long conversation would
+   otherwise push the name field and the buttons off the bottom. */
+.fork-points {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 200px;
+  overflow-y: auto;
+  padding: var(--space-1);
+  border: 1px solid var(--fx-line-default);
+  border-radius: var(--radius-control);
+  background: var(--fx-surface-inset);
+}
+
+.fork-point {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  width: 100%;
+  padding: var(--space-1-5) var(--space-2);
+  border-radius: var(--radius-menu-row);
+  font-size: var(--text-label);
+  color: var(--fx-text-body);
+  text-align: left;
+}
+
+/* The hover rule carries more specificity than the checked one, so without the
+   exclusion a pointer resting on the chosen row would paint the hover colour
+   over the selection and the row would look unchosen while being clicked. */
+.fork-point:hover:not(:disabled):not([aria-checked="true"]) {
+  background: var(--fx-surface-hover-overlay);
+}
+
+.fork-point[aria-checked="true"] {
+  background: var(--fx-accent-blue-selection);
+  color: var(--fx-text-primary);
+}
+
+.fork-point:disabled {
+  opacity: 0.6;
+}
+
+.fork-point__index {
+  flex: none;
+  min-width: 1.2em;
+  font-variant-numeric: tabular-nums;
+  color: var(--fx-text-tertiary);
+}
+
+.fork-point[aria-checked="true"] .fork-point__index {
+  color: var(--fx-accent-blue-border);
+}
+
+.fork-point__text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
 }
 
 .select {

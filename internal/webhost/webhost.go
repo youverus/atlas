@@ -32,6 +32,7 @@ const maxFileBytes = 1 << 20
 type Host struct {
 	kernel   *assembly.Kernel
 	projects *project.Store
+	side     sideTracker
 }
 
 // Options is what a window needs beyond the kernel.
@@ -97,6 +98,63 @@ func (h *Host) OpenSession(path string) error {
 // NewSession starts an empty conversation.
 func (h *Host) NewSession() error {
 	return h.kernel.App.NewSession()
+}
+
+// ForkPoints lists where the conversation in view can be branched: the end of
+// it first, then every prompt in the order it was said.
+//
+// The end is a row rather than a separate command because it is a point like
+// any other — the terminal's /fork menu puts it first for the same reason. The
+// numbering starts at zero there and at one on the messages, so the row number
+// the reader sees is the one the terminal's table prints.
+func (h *Host) ForkPoints() []httpapi.ForkPoint {
+	messages := h.kernel.App.ForkMessages()
+	points := make([]httpapi.ForkPoint, 0, len(messages)+1)
+	points = append(points, httpapi.ForkPoint{Index: 0})
+	for index, message := range messages {
+		points = append(points, httpapi.ForkPoint{
+			EntryID: message.EntryID,
+			Index:   index + 1,
+			Text:    message.Text,
+		})
+	}
+	return points
+}
+
+// ForkSession branches the conversation and names the new session.
+//
+// The copy and the name are one call because they are one intention: a branch
+// nobody asked the name of would arrive in the rail under the name it copied,
+// and the reader would be looking at two rows that claim to be the same
+// conversation. The copy happens first, so a name that cannot be written leaves
+// a fork that exists — that is reported rather than hidden, because the
+// alternative is a session the reader can see but the window says it could not
+// make.
+//
+// An empty entryID branches at the end, which is the whole conversation; a
+// named one branches before that message and returns its text, because the
+// reason to fork in front of something is to say it differently.
+func (h *Host) ForkSession(entryID, name string) (string, error) {
+	text := ""
+	if entryID == "" {
+		if _, err := h.kernel.App.ForkSession(); err != nil {
+			return "", err
+		}
+	} else {
+		forked, err := h.kernel.App.ForkAt(entryID)
+		if err != nil {
+			return "", err
+		}
+		text = forked
+	}
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return text, nil
+	}
+	if err := h.kernel.App.SetName(name); err != nil {
+		return text, fmt.Errorf("webhost: forked, but the new session could not be named: %w", err)
+	}
+	return text, nil
 }
 
 // ArchiveSession hides one conversation from the picker.

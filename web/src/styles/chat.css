@@ -233,10 +233,67 @@
   color: var(--fx-status-danger-text);
 }
 
+/* A notice that is a table rather than a sentence: /help writes the command
+   list into the conversation, and the flex row above would run its columns
+   together into one line. */
+.notice--block {
+  display: block;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-family: var(--font-mono);
+  font-size: var(--text-meta);
+  line-height: 1.7;
+  color: var(--fx-text-tertiary);
+}
+
 .notice__rule {
   flex: 1;
   height: 1px;
   background: var(--fx-line-subtle);
+}
+
+/* ---------- receipt / stream hint ---------- */
+
+/* The turn's bill, under the turn: right-aligned so it reads as metadata about
+   the answer rather than as another sentence in it. Mono and tabular so two
+   consecutive receipts line their digits up. */
+.receipt {
+  align-self: flex-end;
+  padding-top: var(--space-1);
+  font-family: var(--font-mono);
+  font-size: var(--text-micro);
+  font-variant-numeric: tabular-nums;
+  color: var(--fx-text-tertiary);
+  text-align: right;
+}
+
+/* The live rate, in the slot the receipt will take. It is deliberately the same
+   size and colour: the two are the same fact at two moments, and a reader who
+   saw one should recognize the other. */
+.stream-hint {
+  display: flex;
+  align-items: center;
+  align-self: flex-end;
+  gap: var(--space-2);
+  font-family: var(--font-mono);
+  font-size: var(--text-micro);
+  font-variant-numeric: tabular-nums;
+  color: var(--fx-text-tertiary);
+}
+
+.stream-hint__dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--fx-status-success-text);
+}
+
+.stream-hint__dot--steady {
+  background: var(--fx-status-warning-text);
+}
+
+.stream-hint__dot--slow {
+  background: var(--fx-status-danger-text);
 }
 
 /* ---------- approvals ---------- */
@@ -311,6 +368,69 @@
   opacity: 0.5;
 }
 
+/* The one button in a dialog that carries the decision. */
+.button--primary {
+  background: var(--fx-surface-inverse);
+  color: var(--fx-text-inverse);
+  box-shadow: var(--shadow-control);
+}
+
+.button--primary:hover:not(:disabled) {
+  background: var(--fx-surface-inverse-hover);
+}
+
+/* ---------- message actions ---------- */
+
+/* Copy hangs under the message it takes, so every answer can be lifted out on
+   its own instead of only the last one. Quiet by default: it is an offer, not a
+   step in the turn. */
+.turn__actions {
+  display: flex;
+  justify-content: flex-start;
+  gap: var(--space-1);
+  /* The turn's own gap is tuned for content. A control belongs closer to the
+     text it acts on than the next paragraph would, so this pulls back most of
+     that gap and leaves a small one. */
+  margin-top: calc(var(--space-1) - var(--space-3));
+}
+
+/* The fork stays at the end of the conversation, in the reading column, because
+   that is the point it acts on: it continues from the last thing said. */
+.chat__actions {
+  display: flex;
+  justify-content: flex-start;
+  gap: var(--space-1);
+  padding-top: var(--space-1);
+}
+
+.copy-button,
+.fork-button {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1-5);
+  height: 26px;
+  padding: 0 var(--space-2);
+  border-radius: var(--radius-control);
+  font-size: var(--text-label);
+  color: var(--fx-text-tertiary);
+}
+
+.copy-button:hover:not(:disabled),
+.fork-button:hover:not(:disabled) {
+  background: var(--fx-surface-hover-overlay);
+  color: var(--fx-text-body);
+}
+
+.copy-button:disabled,
+.fork-button:disabled {
+  opacity: 0.45;
+}
+
+.copy-button__mark,
+.fork-button__mark {
+  flex: none;
+}
+
 /* ---------- composer ---------- */
 
 .composer {
@@ -319,6 +439,9 @@
 }
 
 .composer__inner {
+  /* The command palette hangs off this box: absolute to it, so the list floats
+     above the input instead of pushing it down under the reader's hands. */
+  position: relative;
   width: 100%;
   max-width: var(--chat-content-max-width);
   margin: 0 auto;
@@ -340,7 +463,13 @@
   box-shadow: 0 0 0 3px var(--fx-accent-blue-selection);
 }
 
-.composer textarea {
+/* The textarea and the paint layer behind it share one set of metrics. They are
+   written as one selector list because any difference between them — family,
+   size, spacing, padding, wrapping — would move the highlight off the word it is
+   marking. `monospace` is spelled out rather than inherited: a textarea's UA
+   font is the generic monospace, and a div would inherit the body's sans. */
+.composer__field textarea,
+.composer__mirror {
   flex: 1;
   min-height: 24px;
   max-height: 200px;
@@ -349,9 +478,44 @@
   outline: none;
   resize: none;
   background: transparent;
+  font-family: monospace;
   font-size: var(--text-body-lg);
   line-height: 1.5;
   color: var(--fx-text-primary);
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+  tab-size: 2;
+}
+
+/* The field is the box the two layers share, so the paint layer can be pinned to
+   it and the textarea still owns the height that the reader's draft grows. */
+.composer__field {
+  position: relative;
+  display: flex;
+  flex: 1;
+  min-width: 0;
+}
+
+.composer__mirror {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+  user-select: none;
+  /* Only the highlight shows: the glyphs are the textarea's, drawn on top. */
+  color: transparent;
+}
+
+.composer__command {
+  /* No padding, weight or letter-spacing: anything that changed the run's
+     metrics would push the textarea's own glyphs out of alignment with the box
+     drawn here. Colour and background only. The underline is the same accent
+     pair the focus ring uses, so "this is a command" reads in the vocabulary the
+     rest of the window already speaks. */
+  border-radius: var(--radius-xs);
+  background: var(--fx-accent-blue-selection);
+  box-shadow: inset 0 -2px 0 var(--fx-accent-blue-border);
+  color: transparent;
 }
 
 .composer textarea::placeholder {
@@ -394,5 +558,291 @@
   box-shadow: var(--shadow-hairline);
   font-family: var(--font-mono);
   font-size: var(--text-micro);
+  color: var(--fx-text-tertiary);
+}
+
+/* ---------- command palette ---------- */
+
+/* Above the input and floating over the transcript: the box below is where the
+   picked name lands, so the list sits on the side the reader's eye is already
+   on. Out of flow because a list that pushed the composer down would move the
+   input out from under the hands that are typing in it. */
+.palette {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: calc(100% + var(--space-2));
+  z-index: 10;
+  display: flex;
+  flex-direction: column;
+  max-height: 300px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: var(--space-1-5);
+  border-radius: var(--radius-menu);
+  background: var(--fx-surface-raised);
+  box-shadow: var(--shadow-menu);
+}
+
+/* The name column is a fixed width in mono, so every summary starts at the same
+   x whether or not the row before it had an argument hint. */
+.palette__row {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  width: 100%;
+  padding: var(--space-1-5) var(--space-2);
+  border-radius: var(--radius-row);
+  text-align: left;
+}
+
+.palette__row:hover,
+.palette__row:focus-visible {
+  background: var(--fx-surface-inset);
+  outline: none;
+}
+
+.palette__name {
+  flex: none;
+  min-width: 96px;
+  font-family: var(--font-mono);
+  font-size: var(--text-label);
+  color: var(--fx-text-primary);
+}
+
+.palette__usage {
+  flex: none;
+  font-family: var(--font-mono);
+  font-size: var(--text-micro);
+  color: var(--fx-text-faint);
+}
+
+.palette__about {
+  font-size: var(--text-label);
+  color: var(--fx-text-tertiary);
+}
+
+.palette__empty {
+  padding: var(--space-2);
+  font-size: var(--text-label);
+  color: var(--fx-text-faint);
+}
+
+.palette__foot {
+  margin-top: var(--space-1);
+  padding: var(--space-1-5) var(--space-2) var(--space-1);
+  border-top: 1px solid var(--fx-line-subtle);
+  font-size: var(--text-micro);
+  line-height: 1.6;
+  color: var(--fx-text-faint);
+}
+
+/* ---------- trajectory ---------- */
+
+/* 轨迹是同一段会话的第二种读法：一列记录，不是一篇文章。所以这里没有气泡、没有
+   markdown，只有等宽的行与可展开的正文——排查要的是对齐与顺序，不是排版。 */
+.trajectory {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  flex-direction: column;
+}
+
+.trajectory__bar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex: none;
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--fx-line-subtle);
+}
+
+.trajectory__title {
+  font-size: var(--text-label);
+  font-weight: 600;
+  color: var(--fx-text-primary);
+}
+
+.trajectory__count {
+  font-family: var(--font-mono);
+  font-size: var(--text-micro);
+  color: var(--fx-text-faint);
+}
+
+.trajectory__spacer {
+  flex: 1;
+}
+
+.trajectory__scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+
+.trajectory__column {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  width: 100%;
+  max-width: var(--chat-content-max-width);
+  margin-inline: auto;
+  padding: var(--space-4) var(--space-5) var(--space-6);
+}
+
+.trajectory__empty {
+  padding: var(--space-6) 0;
+  font-size: var(--text-label);
+  color: var(--fx-text-tertiary);
+  text-align: center;
+}
+
+/* 一轮一段。轮是事实而不是排版分组：轨迹里的轮次由提问那一条记录递增得出，所以
+   分隔带上的数字就是文件里真正发生过的顺序。 */
+.traj-turn {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.traj-turn__head {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  padding: var(--space-1) 0;
+  background: var(--fx-surface-page);
+  font-family: var(--font-mono);
+  font-size: var(--text-micro);
+  color: var(--fx-text-faint);
+  letter-spacing: 0.04em;
+}
+
+.traj-row {
+  border-radius: var(--radius-row);
+  background: var(--fx-surface-raised);
+}
+
+.traj-row--open {
+  box-shadow: var(--shadow-control);
+}
+
+.traj-row__head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  width: 100%;
+  padding: var(--space-1-5) var(--space-2);
+  text-align: left;
+  border-radius: var(--radius-row);
+}
+
+.traj-row__head:hover {
+  background: var(--fx-surface-raised-hover);
+}
+
+/* 类别徽标是定宽的：一列里三十行要能一眼顺着看下去，跳动的左边界会把它变成
+   一堆散字。 */
+.traj-kind {
+  flex: none;
+  min-width: 52px;
+  font-size: var(--text-micro);
+  color: var(--fx-text-tertiary);
+  text-align: center;
+  padding: 1px var(--space-1);
+  border-radius: var(--radius-xs);
+  background: var(--fx-surface-inset);
+}
+
+.traj-kind--prompt {
+  color: var(--fx-accent-blue-text);
+  background: var(--fx-accent-blue-soft);
+}
+
+.traj-kind--assistant {
+  color: var(--fx-text-primary);
+}
+
+.traj-kind--tool {
+  color: var(--fx-data-violet);
+}
+
+.traj-kind--compaction,
+.traj-kind--branch_summary,
+.traj-kind--context_edit {
+  color: var(--fx-status-warning);
+  background: var(--fx-status-warning-soft);
+}
+
+.traj-row[data-kind="tool"] .traj-row__head {
+  cursor: pointer;
+}
+
+.traj-row__tool {
+  flex: none;
+  font-family: var(--font-mono);
+  font-size: var(--text-label);
+  color: var(--fx-text-primary);
+}
+
+.traj-row__preview {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  font-size: var(--text-label);
+  color: var(--fx-text-secondary);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.traj-row__meta {
+  display: flex;
+  flex: none;
+  align-items: baseline;
+  gap: var(--space-2);
+  font-family: var(--font-mono);
+  font-size: var(--text-micro);
+  color: var(--fx-text-faint);
+}
+
+.traj-row__flag {
+  color: var(--fx-status-danger-text);
+}
+
+.traj-row__seq {
+  min-width: 52px;
+  text-align: right;
+}
+
+.traj-row__body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: 0 var(--space-2) var(--space-2-5) 64px;
+}
+
+.traj-field {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.traj-field__label {
+  font-size: var(--text-micro);
+  color: var(--fx-text-faint);
+}
+
+/* 正文一律等宽并保留换行：参数与输出是代码，折行可以，重排不行。 */
+.traj-field__value {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: var(--text-label);
+  line-height: 1.55;
+  color: var(--fx-text-primary);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.traj-field__value--line {
   color: var(--fx-text-tertiary);
 }

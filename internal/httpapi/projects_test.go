@@ -64,7 +64,7 @@ func (p picker) PickFolder() (string, error) { return p.path, p.err }
 func projectServer(t *testing.T, host Host, chooser Picker) *httptest.Server {
 	t.Helper()
 	server := New(Options{
-		Turn:   func(context.Context, string, func(wire.AgentEvent) error) error { return nil },
+		Turn:   func(context.Context, string, func(wire.AgentEvent) error) (Receipt, error) { return Receipt{}, nil },
 		Host:   host,
 		Picker: chooser,
 	})

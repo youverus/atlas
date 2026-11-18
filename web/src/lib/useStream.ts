@@ -6,7 +6,7 @@
 // whatever the gap made stale.
 
 import { useEffect, useRef } from "react";
-import type { AgentEvent, PendingQuestion, Status } from "../api";
+import type { AgentEvent, PendingQuestion, SideStatus, Status } from "../api";
 
 export interface StreamHandlers {
   onAgent: (event: AgentEvent) => void;
@@ -14,6 +14,10 @@ export interface StreamHandlers {
   onApproval: (question: PendingQuestion) => void;
   onHello: (facts: { version?: string; directory?: string; model?: string }) => void;
   onConnect: (connected: boolean) => void;
+  /** 侧对话的事件走另外两个名字：一段流里有两个 agent，靠名字分开比在每一帧
+   *  里塞一个标记便宜——折叠处不用为每个 case 多判断一次。 */
+  onSideAgent: (event: AgentEvent) => void;
+  onSideStatus: (status: SideStatus) => void;
 }
 
 export function useStream(handlers: StreamHandlers): void {
@@ -37,6 +41,13 @@ export function useStream(handlers: StreamHandlers): void {
     });
     source.addEventListener("approval", (message) => {
       latest.current.onApproval(JSON.parse((message as MessageEvent).data));
+    });
+    // 侧对话的两个名字。分开的理由在 StreamHandlers 上：两条流同时活着。
+    source.addEventListener("sideagent", (message) => {
+      latest.current.onSideAgent(JSON.parse((message as MessageEvent).data));
+    });
+    source.addEventListener("sidestatus", (message) => {
+      latest.current.onSideStatus(JSON.parse((message as MessageEvent).data));
     });
 
     source.onopen = () => latest.current.onConnect(true);

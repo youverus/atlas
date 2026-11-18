@@ -20,10 +20,10 @@ func TestAnApprovalBlocksUntilThePageAnswers(t *testing.T) {
 	// server is assigned before any turn runs, so the closure below always
 	// sees the value it needs; the gate can only ask from inside a turn.
 	var server *Server
-	server = New(Options{Turn: func(ctx context.Context, prompt string, emit func(wire.AgentEvent) error) error {
+	server = New(Options{Turn: func(ctx context.Context, prompt string, emit func(wire.AgentEvent) error) (Receipt, error) {
 		// The tool goroutine parks here, exactly as the permission gate does.
 		answered <- server.Ask(Question{Subject: "writes /tmp/x", Tool: "write"})
-		return nil
+		return Receipt{}, nil
 	}})
 	httpServer := httptest.NewServer(server.Handler())
 	defer httpServer.Close()
@@ -147,8 +147,8 @@ func TestClosingTheServerDeniesOpenQuestions(t *testing.T) {
 // built app: the box is a component now, so the thing worth asserting is that
 // the artifact the binary carries still posts to this route.
 func TestThePageDrawsAnApprovalBox(t *testing.T) {
-	server := New(Options{Turn: func(context.Context, string, func(wire.AgentEvent) error) error {
-		return nil
+	server := New(Options{Turn: func(context.Context, string, func(wire.AgentEvent) error) (Receipt, error) {
+		return Receipt{}, nil
 	}})
 	defer server.Close()
 

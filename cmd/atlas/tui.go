@@ -19,6 +19,7 @@ import (
 	"pi-go/internal/app"
 	"pi-go/internal/assembly"
 	"pi-go/internal/config"
+	"pi-go/internal/cost"
 	"pi-go/internal/theme"
 	"pi-go/internal/tui"
 	"pi-go/internal/wire"
@@ -406,9 +407,9 @@ func tuiSideTurn(ctx context.Context, conversation *app.Side, line string, sink 
 // model created rather than as os.Interrupt. The result travels back for the
 // callers that read it — the goal loop accounts tokens from it.
 func tuiTurn(ctx context.Context, sink tui.Sink, run func(context.Context, func(wire.AgentEvent) error) (app.Result, error)) (app.Result, error) {
-	timer := newTurnTimer()
+	timer := cost.NewTimer()
 	result, err := run(ctx, func(event wire.AgentEvent) error {
-		timer.observe(event)
+		timer.Observe(event)
 		sink.Event(event)
 		return nil
 	})
@@ -423,7 +424,7 @@ func tuiTurn(ctx context.Context, sink tui.Sink, run func(context.Context, func(
 	// is already on screen in red, and a line under it measuring how long a
 	// rejected request took to be rejected says nothing a reader wants.
 	if usage := result.Usage; usage.TotalTokens > 0 {
-		sink.Note(timer.cost().line(usage))
+		sink.Note(timer.Cost().Line(usage))
 	}
 
 	if err != nil {

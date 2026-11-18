@@ -1,4 +1,4 @@
-package main
+package cost
 
 // The receipt a turn leaves behind: what it spent, how fast the model wrote,
 // how long the turn took, and when it stopped.
@@ -19,8 +19,8 @@ func (c *pinnedClock) now() time.Time { return c.at }
 func (c *pinnedClock) advance(by time.Duration) { c.at = c.at.Add(by) }
 
 // pinnedTimer starts a timer at a fixed time with a clock the test controls.
-func pinnedTimer(clock *pinnedClock) *turnTimer {
-	timer := &turnTimer{now: clock.now}
+func pinnedTimer(clock *pinnedClock) *Timer {
+	timer := &Timer{now: clock.now}
 	timer.began = timer.now()
 	return timer
 }
@@ -30,7 +30,7 @@ func message(kind string, role wire.Role) wire.AgentEvent {
 }
 
 func TestTheCostLineSaysWhatTheTurnSpent(t *testing.T) {
-	cost := turnCost{
+	receipt := Cost{
 		Took:  8400 * time.Millisecond,
 		Wrote: 8400 * time.Millisecond,
 		Ended: time.Date(2026, 10, 21, 15, 3, 11, 0, time.Local),
@@ -38,7 +38,7 @@ func TestTheCostLineSaysWhatTheTurnSpent(t *testing.T) {
 	usage := wire.Usage{Input: 1204, Output: 519, TotalTokens: 1723}
 
 	want := "1723 tokens (in 1204, out 519) · 62 tok/s · took 8.4s · ended at 15:03:11"
-	if got := cost.line(usage); got != want {
+	if got := receipt.Line(usage); got != want {
 		t.Fatalf("line = %q, want %q", got, want)
 	}
 }
@@ -47,7 +47,7 @@ func TestTheCostLineSaysWhatTheTurnSpent(t *testing.T) {
 // that spent its time in tools did not write slowly, and dividing by the whole
 // turn would report the tools' latency as the model's speed.
 func TestTheRateIsTheWritingTimeNotTheTurn(t *testing.T) {
-	cost := turnCost{
+	receipt := Cost{
 		Took:  30 * time.Second,
 		Wrote: 2 * time.Second,
 		Ended: time.Date(2026, 10, 21, 15, 3, 11, 0, time.Local),
@@ -55,7 +55,7 @@ func TestTheRateIsTheWritingTimeNotTheTurn(t *testing.T) {
 	usage := wire.Usage{Input: 1204, Output: 519, TotalTokens: 1723}
 
 	want := "1723 tokens (in 1204, out 519) · 260 tok/s · took 30.0s · ended at 15:03:11"
-	if got := cost.line(usage); got != want {
+	if got := receipt.Line(usage); got != want {
 		t.Fatalf("line = %q, want %q", got, want)
 	}
 }
@@ -63,7 +63,7 @@ func TestTheRateIsTheWritingTimeNotTheTurn(t *testing.T) {
 // TestTheRateKeepsADecimalWhenItIsSmall: below ten, a tenth is the difference
 // between a slow model and a stalled one.
 func TestTheRateKeepsADecimalWhenItIsSmall(t *testing.T) {
-	cost := turnCost{
+	receipt := Cost{
 		Took:  2 * time.Second,
 		Wrote: 2 * time.Second,
 		Ended: time.Date(2026, 10, 21, 15, 3, 11, 0, time.Local),
@@ -71,7 +71,7 @@ func TestTheRateKeepsADecimalWhenItIsSmall(t *testing.T) {
 	usage := wire.Usage{Input: 40, Output: 8, TotalTokens: 48}
 
 	want := "48 tokens (in 40, out 8) · 4.0 tok/s · took 2.0s · ended at 15:03:11"
-	if got := cost.line(usage); got != want {
+	if got := receipt.Line(usage); got != want {
 		t.Fatalf("line = %q, want %q", got, want)
 	}
 }
@@ -80,15 +80,43 @@ func TestTheRateKeepsADecimalWhenItIsSmall(t *testing.T) {
 // answer with no words in it, a zero rate reads as a failure rather than as a
 // turn that had nothing to say.
 func TestNoRateWhenTheModelWroteNothing(t *testing.T) {
-	cost := turnCost{
+	receipt := Cost{
 		Took:  40 * time.Millisecond,
 		Ended: time.Date(2026, 10, 21, 15, 3, 11, 0, time.Local),
 	}
 	usage := wire.Usage{Input: 1204, TotalTokens: 1204}
 
 	want := "1204 tokens (in 1204, out 0) · took 40ms · ended at 15:03:11"
-	if got := cost.line(usage); got != want {
+	if got := receipt.Line(usage); got != want {
 		t.Fatalf("line = %q, want %q", got, want)
+	}
+}
+
+// TestFieldsAreSeparateWords: the terminal joins with dots, the pipe joins with
+// commas, and a window joins with whatever its own layout wants. The parts are
+// what is shared, so they must not arrive pre-joined.
+func TestFieldsAreSeparateWords(t *testing.T) {
+	receipt := Cost{
+		Took:  8400 * time.Millisecond,
+		Wrote: 8400 * time.Millisecond,
+		Ended: time.Date(2026, 10, 21, 15, 3, 11, 0, time.Local),
+	}
+	usage := wire.Usage{Input: 1204, Output: 519, TotalTokens: 1723}
+
+	fields := receipt.Fields(usage)
+	want := []string{
+		"1723 tokens (in 1204, out 519)",
+		"62 tok/s",
+		"took 8.4s",
+		"ended at 15:03:11",
+	}
+	if len(fields) != len(want) {
+		t.Fatalf("fields = %q, want %q", fields, want)
+	}
+	for index, field := range fields {
+		if field != want[index] {
+			t.Fatalf("field %d = %q, want %q", index, field, want[index])
+		}
 	}
 }
 
@@ -98,30 +126,30 @@ func TestTheTimerCountsOnlyTheModelWriting(t *testing.T) {
 
 	// The prompt is a message too. Reading it is not the model writing, and a
 	// rate that counted it would fall with however long the reader typed.
-	timer.observe(message(wire.AgentEventMessageStart, wire.RoleUser))
+	timer.Observe(message(wire.AgentEventMessageStart, wire.RoleUser))
 	clock.advance(100 * time.Millisecond)
-	timer.observe(message(wire.AgentEventMessageEnd, wire.RoleUser))
+	timer.Observe(message(wire.AgentEventMessageEnd, wire.RoleUser))
 	clock.advance(100 * time.Millisecond)
 
 	// Two seconds of answer...
-	timer.observe(message(wire.AgentEventMessageStart, wire.RoleAssistant))
+	timer.Observe(message(wire.AgentEventMessageStart, wire.RoleAssistant))
 	clock.advance(2 * time.Second)
-	timer.observe(message(wire.AgentEventMessageEnd, wire.RoleAssistant))
+	timer.Observe(message(wire.AgentEventMessageEnd, wire.RoleAssistant))
 
 	// ...and six of tools, which belong to the turn.
-	timer.observe(wire.AgentEvent{Type: wire.AgentEventToolExecStart, ToolName: "bash"})
+	timer.Observe(wire.AgentEvent{Type: wire.AgentEventToolExecStart, ToolName: "bash"})
 	clock.advance(6 * time.Second)
-	timer.observe(wire.AgentEvent{Type: wire.AgentEventToolExecEnd, ToolName: "bash"})
+	timer.Observe(wire.AgentEvent{Type: wire.AgentEventToolExecEnd, ToolName: "bash"})
 
-	cost := timer.cost()
-	if want := 8200 * time.Millisecond; cost.Took != want {
-		t.Fatalf("took = %v, want %v", cost.Took, want)
+	receipt := timer.Cost()
+	if want := 8200 * time.Millisecond; receipt.Took != want {
+		t.Fatalf("took = %v, want %v", receipt.Took, want)
 	}
-	if want := 2 * time.Second; cost.Wrote != want {
-		t.Fatalf("wrote = %v, want %v", cost.Wrote, want)
+	if want := 2 * time.Second; receipt.Wrote != want {
+		t.Fatalf("wrote = %v, want %v", receipt.Wrote, want)
 	}
-	if want := "15:03:11"; cost.Ended.Format("15:04:05") != want {
-		t.Fatalf("ended at %q, want %q", cost.Ended.Format("15:04:05"), want)
+	if want := "15:03:11"; receipt.Ended.Format("15:04:05") != want {
+		t.Fatalf("ended at %q, want %q", receipt.Ended.Format("15:04:05"), want)
 	}
 }
 
@@ -132,13 +160,13 @@ func TestTheTimerKeepsAddingAcrossAnswers(t *testing.T) {
 	timer := pinnedTimer(clock)
 
 	for _, pause := range []time.Duration{time.Second, 3 * time.Second} {
-		timer.observe(message(wire.AgentEventMessageStart, wire.RoleAssistant))
+		timer.Observe(message(wire.AgentEventMessageStart, wire.RoleAssistant))
 		clock.advance(pause)
-		timer.observe(message(wire.AgentEventMessageEnd, wire.RoleAssistant))
+		timer.Observe(message(wire.AgentEventMessageEnd, wire.RoleAssistant))
 	}
 
-	if want := 4 * time.Second; timer.cost().Wrote != want {
-		t.Fatalf("wrote = %v, want %v", timer.cost().Wrote, want)
+	if want := 4 * time.Second; timer.Cost().Wrote != want {
+		t.Fatalf("wrote = %v, want %v", timer.Cost().Wrote, want)
 	}
 }
 
@@ -150,15 +178,15 @@ func TestTheTimerCountsAnAnswerThatNeverEnded(t *testing.T) {
 	clock := &pinnedClock{at: time.Date(2026, 10, 21, 15, 3, 3, 0, time.Local)}
 	timer := pinnedTimer(clock)
 
-	timer.observe(message(wire.AgentEventMessageStart, wire.RoleAssistant))
+	timer.Observe(message(wire.AgentEventMessageStart, wire.RoleAssistant))
 	clock.advance(3 * time.Second)
 
-	cost := timer.cost()
-	if want := 3 * time.Second; cost.Wrote != want {
-		t.Fatalf("wrote = %v, want %v", cost.Wrote, want)
+	receipt := timer.Cost()
+	if want := 3 * time.Second; receipt.Wrote != want {
+		t.Fatalf("wrote = %v, want %v", receipt.Wrote, want)
 	}
-	if cost.Took != cost.Wrote {
-		t.Fatalf("took = %v, wrote = %v: one answer with nothing behind it", cost.Took, cost.Wrote)
+	if receipt.Took != receipt.Wrote {
+		t.Fatalf("took = %v, wrote = %v: one answer with nothing behind it", receipt.Took, receipt.Wrote)
 	}
 }
 
@@ -169,19 +197,19 @@ func TestTheTimerIgnoresEventsWithoutAMessage(t *testing.T) {
 	clock := &pinnedClock{at: time.Date(2026, 10, 21, 15, 3, 3, 0, time.Local)}
 	timer := pinnedTimer(clock)
 
-	timer.observe(wire.AgentEvent{Type: wire.AgentEventStart})
-	timer.observe(wire.AgentEvent{Type: wire.AgentEventMessageStart})
-	timer.observe(wire.AgentEvent{Type: wire.AgentEventEnd})
+	timer.Observe(wire.AgentEvent{Type: wire.AgentEventStart})
+	timer.Observe(wire.AgentEvent{Type: wire.AgentEventMessageStart})
+	timer.Observe(wire.AgentEvent{Type: wire.AgentEventEnd})
 	clock.advance(time.Second)
 
-	cost := timer.cost()
-	if cost.Wrote != 0 {
-		t.Fatalf("wrote = %v, want nothing", cost.Wrote)
+	receipt := timer.Cost()
+	if receipt.Wrote != 0 {
+		t.Fatalf("wrote = %v, want nothing", receipt.Wrote)
 	}
-	if want := time.Second; cost.Took != want {
-		t.Fatalf("took = %v, want %v", cost.Took, want)
+	if want := time.Second; receipt.Took != want {
+		t.Fatalf("took = %v, want %v", receipt.Took, want)
 	}
-	if line := cost.line(wire.Usage{}); line != "" {
+	if line := receipt.Line(wire.Usage{}); line != "" {
 		t.Fatalf("line = %q, want nothing at all", line)
 	}
 }

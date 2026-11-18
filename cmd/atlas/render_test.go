@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"pi-go/internal/app"
+	"pi-go/internal/cost"
 	"pi-go/internal/tool"
 	"pi-go/internal/wire"
 )
@@ -272,7 +273,7 @@ func TestTheTurnSummaryStaysOnStderr(t *testing.T) {
 	render.summary(app.Result{
 		Usage:      wire.Usage{Input: 1000, Output: 234, TotalTokens: 1234},
 		StopReason: wire.StopStop,
-	}, turnCost{
+	}, cost.Cost{
 		Took:  8400 * time.Millisecond,
 		Wrote: 2 * time.Second,
 		Ended: time.Date(2026, 10, 21, 15, 3, 11, 0, time.Local),
@@ -292,7 +293,7 @@ func TestTheTurnSummaryStaysOnStderr(t *testing.T) {
 // request rejected before it ever reached a model both land here.
 func TestTheSummaryOfATurnThatSpentNothingStaysOneWord(t *testing.T) {
 	render, _, errOut := scriptRenderer(time.Millisecond)
-	render.summary(app.Result{StopReason: wire.StopError}, turnCost{
+	render.summary(app.Result{StopReason: wire.StopError}, cost.Cost{
 		Took:  340 * time.Millisecond,
 		Ended: time.Date(2026, 10, 21, 15, 3, 11, 0, time.Local),
 	})

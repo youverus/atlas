@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"pi-go/internal/app"
+	"pi-go/internal/cost"
 	"pi-go/internal/wire"
 )
 
@@ -392,7 +393,7 @@ func (r *renderer) separate(next blockKind) error {
 // The parts are the ones the full-screen session prints, joined with commas
 // instead of its dots: one fact, spelled once, so a reader who has both front
 // ends open does not have to translate between them.
-func (r *renderer) summary(result app.Result, cost turnCost) {
+func (r *renderer) summary(result app.Result, receipt cost.Cost) {
 	if r.asJSON {
 		return
 	}
@@ -400,22 +401,16 @@ func (r *renderer) summary(result app.Result, cost turnCost) {
 	if stop == "" {
 		stop = "unknown"
 	}
-	fields := append(cost.fields(result.Usage), "stop reason "+stop)
+	fields := append(receipt.Fields(result.Usage), "stop reason "+stop)
 	fmt.Fprintf(r.errOut, "[%s]\n", strings.Join(fields, ", "))
 }
 
 // humanDuration is how long something took, in the unit a human would say it
-// in: milliseconds under a second, tenths under a minute, and a clock reading
-// past that.
+// in. The words live in internal/cost because a turn's receipt prints the same
+// spans: two copies of this switch would drift, and the tool cards and the
+// receipt would start disagreeing about what a second looks like.
 func humanDuration(duration time.Duration) string {
-	switch {
-	case duration < time.Second:
-		return fmt.Sprintf("%dms", duration.Milliseconds())
-	case duration < time.Minute:
-		return fmt.Sprintf("%.1fs", duration.Seconds())
-	}
-	seconds := int(duration.Seconds())
-	return fmt.Sprintf("%dm%02ds", seconds/60, seconds%60)
+	return cost.HumanDuration(duration)
 }
 
 // toolOutcome names what a call produced. Zero is worth saying: a call that

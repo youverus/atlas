@@ -10,9 +10,19 @@ package web
 import (
 	"embed"
 	"io/fs"
+	"mime"
 	"net/http"
 	"strings"
 )
+
+func init() {
+	// Go builds its type table from the host's mime.types when one exists: this
+	// machine has woff2, a bare container may not, and then the file server
+	// sniffs the bytes and answers application/octet-stream. KaTeX's fonts are
+	// the first binary assets in dist, so the type is named here instead of
+	// inherited from whatever the host happens to know.
+	_ = mime.AddExtensionType(".woff2", "font/woff2")
+}
 
 //go:embed all:dist
 var embedded embed.FS

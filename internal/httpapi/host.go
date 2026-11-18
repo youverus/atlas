@@ -6,6 +6,8 @@ import (
 	"io"
 	"net/http"
 	"strconv"
+
+	"pi-go/internal/wire"
 )
 
 // Host is what a full window needs beyond a single turn: the sessions it can
@@ -17,7 +19,9 @@ import (
 // ported to. The composition root implements this over the real kernel.
 //
 // Every method returns an error rather than panicking: a window that asks for a
-// session that has been deleted should be told so, not dropped.
+// session that has been deleted should be told so, not dropped. ForkPoints is
+// the one exception, because it only reads entries already in memory and so has
+// nothing to report; giving it an error nobody can return would be ceremony.
 type Host interface {
 	// Sessions lists conversations, newest first. archived selects the other
 	// list rather than adding to this one, because a picker and a recovery
@@ -27,6 +31,15 @@ type Host interface {
 	OpenSession(path string) error
 	// NewSession abandons the current conversation and starts an empty one.
 	NewSession() error
+	// ForkPoints lists where the conversation in view can be branched: the end
+	// of it first, then every user message in the order it was said.
+	ForkPoints() []ForkPoint
+	// ForkSession branches the conversation before entryID, or at the end of it
+	// when entryID is empty, leaving the current one on disk untouched. The name
+	// is applied to the new session; empty keeps whatever the copy inherited.
+	// It returns the text of the message that was branched off — the caller
+	// offers it back so the reader can say it differently.
+	ForkSession(entryID, name string) (string, error)
 	// ArchiveSession hides a conversation from the picker without deleting it.
 	ArchiveSession(path string) error
 	// RestoreSession undoes ArchiveSession.
@@ -38,6 +51,23 @@ type Host interface {
 	// was thrown away, so the window reads it back in the same shape the live
 	// stream produces.
 	Transcript() ([]TranscriptBlock, error)
+	// Trajectory folds the conversation in view into the rows a debugger walks.
+	// It answers the question the transcript cannot: what was recorded, in what
+	// order, with which arguments — including the thinking, the usage and the
+	// compactions that a reading view leaves out.
+	Trajectory() ([]TrajectoryRow, error)
+
+	// Side reads the temporary conversation beside the main one. Opening and
+	// closing it take a snapshot of the main history, which is a kernel
+	// decision: a window that copied messages itself would be a second answer
+	// to what the side conversation inherits.
+	Side() (SideView, error)
+	// OpenSide takes the snapshot. It is a no-op when one is already open,
+	// because BeginSide discards the previous one and a page that redraws must
+	// not lose the conversation it is showing.
+	OpenSide() error
+	// CloseSide discards it. Nothing reaches disk, so there is nothing to undo.
+	CloseSide() error
 
 	// Projects lists the folders a window draws, each with its conversations.
 	// archived selects the other list, the same way Sessions does.
@@ -136,6 +166,80 @@ type TranscriptBlock struct {
 	ID     string `json:"id,omitempty"`
 }
 
+// TrajectoryRow is one recorded fact of the conversation in view: a prompt, an
+// answer, a call with its outcome, or one of the events between them.
+//
+// It mirrors trajectory.Row for the same reason TranscriptBlock mirrors
+// transcript.Block — the transport stays ignorant of the session format — and
+// the two are kept equal by a test in webhost, which is the one package allowed
+// to hold both. Kind is a string for the reason Role is: the fold's set of kinds
+// can grow without renaming the rows already on the wire.
+//
+// Nothing here is truncated. The window decides what to unfold, because the
+// evidence is the point of the view and a cut in the transport would be a fact
+// the page cannot recover.
+type TrajectoryRow struct {
+	// Index is the row's position in the fold and the only unique key: a
+	// round's calls share the round's Seq.
+	Index    int    `json:"index"`
+	Seq      int    `json:"seq"`
+	EntryID  string `json:"entryId"`
+	ParentID string `json:"parentId,omitempty"`
+	// Turn numbers the prompt the row belongs to, from 1. Rows recorded before
+	// any prompt are 0.
+	Turn      int    `json:"turn"`
+	Kind      string `json:"kind"`
+	Timestamp string `json:"timestamp"`
+	// DurationMs is a recorded wall-clock duration: the call, or the round.
+	DurationMs  int64 `json:"durationMs,omitempty"`
+	IsError     bool  `json:"isError,omitempty"`
+	Interrupted bool  `json:"interrupted,omitempty"`
+
+	Tool string `json:"tool,omitempty"`
+	Ref  string `json:"ref,omitempty"`
+	Text string `json:"text,omitempty"`
+	// Thinking is the round's reasoning, which the transcript drops.
+	Thinking string      `json:"thinking,omitempty"`
+	Error    string      `json:"error,omitempty"`
+	Args     string      `json:"args,omitempty"`
+	Result   string      `json:"result,omitempty"`
+	Model    string      `json:"model,omitempty"`
+	Usage    *wire.Usage `json:"usage,omitempty"`
+	// TokensBefore is how large the context was when a compaction replaced it.
+	TokensBefore int64 `json:"tokensBefore,omitempty"`
+}
+
+// SideView is the temporary conversation beside the main one.
+//
+// Blocks covers the whole conversation the side agent holds, inherited prefix
+// included: the panel draws a divider at Inherited rather than dropping the
+// messages, because a reader asking the side "what did we just say" is entitled
+// to see the same words the model was given. Inherited counts blocks, not
+// messages, so the divider cannot land inside a tool card; it is 0 when nothing
+// was inherited, and Open is false when there is no side conversation at all —
+// the page then draws no panel and Blocks is empty.
+type SideView struct {
+	Open      bool              `json:"open"`
+	Inherited int               `json:"inherited"`
+	Blocks    []TranscriptBlock `json:"blocks"`
+}
+
+// ForkPoint is one place the conversation can be branched before.
+//
+// Index is the number the reader picks it by, and 0 is the end of the
+// conversation: that point has no entry to name, which is why EntryID is empty
+// there rather than absent — "the whole conversation" is a row like any other,
+// and the page draws it from the same list.
+//
+// Text is the message in full, not a preview. The window already holds the
+// whole transcript, so a cut here would save nothing and would put a second
+// truncation rule next to the one the terminal uses.
+type ForkPoint struct {
+	EntryID string `json:"entryId,omitempty"`
+	Index   int    `json:"index"`
+	Text    string `json:"text,omitempty"`
+}
+
 // ModelOption is one selectable model. Levels is empty for a model that does// not reason, which is what lets the picker hide the thinking control instead
 // of offering a choice that would be rejected.
 type ModelOption struct {
@@ -226,8 +330,11 @@ type FileContent struct {
 func (s *Server) mountHost() {
 	s.mux.HandleFunc("GET /api/sessions", s.serveSessions)
 	s.mux.HandleFunc("GET /api/sessions/transcript", s.serveSessionTranscript)
+	s.mux.HandleFunc("GET /api/sessions/trajectory", s.serveSessionTrajectory)
 	s.mux.HandleFunc("POST /api/sessions/open", s.serveSessionOpen)
 	s.mux.HandleFunc("POST /api/sessions/new", s.serveSessionNew)
+	s.mux.HandleFunc("POST /api/sessions/fork", s.serveSessionFork)
+	s.mux.HandleFunc("GET /api/sessions/fork-points", s.serveSessionForkPoints)
 	s.mux.HandleFunc("POST /api/sessions/archive", s.serveSessionArchive)
 	s.mux.HandleFunc("POST /api/sessions/restore", s.serveSessionRestore)
 	s.mux.HandleFunc("POST /api/sessions/delete", s.serveSessionDelete)
@@ -337,6 +444,29 @@ func (s *Server) serveSessionTranscript(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, blocks)
 }
 
+// serveSessionTrajectory reports every recorded fact of the conversation in
+// view, in file order.
+//
+// No path parameter, for the reason the transcript has none: the conversation
+// on screen is the one the switch made current, and a route that could name any
+// session would answer for a conversation the reader is not looking at. The
+// fold only follows the current branch, so a fork's abandoned attempts are not
+// in the answer — they are not part of the path being debugged.
+func (s *Server) serveSessionTrajectory(w http.ResponseWriter, r *http.Request) {
+	if !s.needHost(w) {
+		return
+	}
+	rows, err := s.host.Trajectory()
+	if err != nil {
+		fail(w, err, http.StatusConflict)
+		return
+	}
+	if rows == nil {
+		rows = []TrajectoryRow{}
+	}
+	writeJSON(w, rows)
+}
+
 // newSessionRequest is the body of /api/sessions/new. Cwd is optional: the
 // primary button starts a conversation where the last one ran, and a project's
 // own button names the folder it belongs to.
@@ -367,6 +497,62 @@ func (s *Server) serveSessionNew(w http.ResponseWriter, r *http.Request) {
 	}
 	s.publishStatus(statusEvent{Running: s.running.Load()})
 	writeJSON(w, map[string]bool{"ok": true})
+}
+
+// forkSessionRequest is the body of /api/sessions/fork. Both halves are
+// optional: no entryID means the end of the conversation, and no name means the
+// copy keeps the name it inherited, which is what the terminal's bare /fork
+// does too.
+type forkSessionRequest struct {
+	EntryID string `json:"entryId"`
+	Name    string `json:"name"`
+}
+
+// forkSessionResponse carries the message that was branched off, so the page can
+// put it back in the input box. It is empty for a fork at the end: nothing was
+// left behind to say differently.
+type forkSessionResponse struct {
+	OK   bool   `json:"ok"`
+	Text string `json:"text,omitempty"`
+}
+
+// serveSessionForkPoints answers where the conversation in view can be branched.
+//
+// It names no session, for the same reason the transcript does not: the kernel
+// holds one, and a path parameter would let a stale row describe another.
+func (s *Server) serveSessionForkPoints(w http.ResponseWriter, r *http.Request) {
+	if !s.needHost(w) {
+		return
+	}
+	points := s.host.ForkPoints()
+	if points == nil {
+		points = []ForkPoint{}
+	}
+	writeJSON(w, points)
+}
+
+// serveSessionFork continues the conversation in a new session.
+//
+// It is a POST even though the old conversation is only read: the kernel's
+// current session moves to the new one, which is the same kind of change
+// /api/sessions/open makes. The body is optional, so a caller with no name to
+// give sends nothing rather than an empty object.
+func (s *Server) serveSessionFork(w http.ResponseWriter, r *http.Request) {
+	if !s.needHost(w) {
+		return
+	}
+	var request forkSessionRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&request); err != nil && !errors.Is(err, io.EOF) {
+		http.Error(w, "httpapi: bad request body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	text, err := s.host.ForkSession(request.EntryID, request.Name)
+	if err != nil {
+		fail(w, err, http.StatusConflict)
+		return
+	}
+	s.publishStatus(statusEvent{Running: s.running.Load()})
+	writeJSON(w, forkSessionResponse{OK: true, Text: text})
 }
 
 // serveProjects draws the rail: every folder with its conversations.

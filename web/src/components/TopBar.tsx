@@ -9,8 +9,10 @@ export function TopBar({
   connected,
   running,
   filesOpen,
+  trajectoryOpen,
   onOpenSettings,
   onToggleFiles,
+  onToggleTrajectory,
 }: {
   title: string;
   model: string;
@@ -19,8 +21,10 @@ export function TopBar({
   connected: boolean;
   running: boolean;
   filesOpen: boolean;
+  trajectoryOpen: boolean;
   onOpenSettings: () => void;
   onToggleFiles: () => void;
+  onToggleTrajectory: () => void;
 }) {
   return (
     <header className="topbar">
@@ -54,6 +58,17 @@ export function TopBar({
           aria-label="文件"
         >
           ⌸
+        </button>
+        {/* 轨迹是阅读列的第二种读法，所以它挨着文件那个布局开关，而不是放进设置
+            面板：读的时候要能一下翻过去再翻回来。 */}
+        <button
+          type="button"
+          className={trajectoryOpen ? "chip chip--button chip--accent" : "chip chip--button"}
+          onClick={onToggleTrajectory}
+          aria-pressed={trajectoryOpen}
+          title="看这段会话记录了什么：每条的事实、顺序与出处"
+        >
+          轨迹
         </button>
       </span>
     </header>

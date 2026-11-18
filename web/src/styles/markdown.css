@@ -130,3 +130,27 @@
   font-weight: 600;
   color: var(--fx-text-primary);
 }
+
+/* ---------- formulas ---------- */
+
+/* A display formula is exactly as wide as its content, and a derivation is
+   often wider than the reading column. Scrolling inside the formula's own line
+   keeps the column from moving sideways, which would take the surrounding
+   paragraph with it. */
+.markdown .katex-display {
+  margin: 0.9em 0;
+  padding: 0.15em 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
+/* KaTeX draws in currentColor, so the dark theme needs no second rule here.
+   Its own 1.21em size is left alone: that ratio is what makes math read at the
+   same weight as the prose around it. The error span is the exception — a
+   formula the renderer could not parse is not body text, and it should look
+   like something to fix. */
+.markdown .katex-error {
+  color: var(--fx-status-danger);
+  font-family: var(--font-mono);
+}
+

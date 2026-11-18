@@ -41,7 +41,34 @@ import (
 // failed request: the POST that started the turn is long gone by then. An
 // implementation that returns with a nil error is done; one that returns an
 // error has already published whatever it managed to do.
-type Turn func(ctx context.Context, prompt string, emit func(wire.AgentEvent) error) error
+//
+// The receipt is returned rather than published as an agent event, because the
+// agent protocol has no such event: what a turn cost is the host's account of
+// it, and the transport only carries that account to the window.
+type Turn func(ctx context.Context, prompt string, emit func(wire.AgentEvent) error) (Receipt, error)
+
+// Compact runs one manual compaction of the conversation in view.
+//
+// It is a function of its own rather than a Host method for the reason Turn is:
+// it emits while it runs, and only this package knows where events go. The
+// kernel's compaction already announces itself — compaction_start, then
+// compaction_end carrying either the result or the error — so an implementation
+// forwards and decides nothing. The numbers a reader sees are read off that end
+// event, which is why nothing is returned: a second copy on the response would
+// be a second opinion about what the same compaction did.
+type Compact func(ctx context.Context, note string, emit func(wire.AgentEvent) error) error
+
+// Receipt is what one turn spent, in the words a reader reads.
+//
+// The parts arrive already spelled ("1723 tokens (in 1204, out 519)",
+// "62 tok/s", "took 8.4s", "ended at 15:03:11") because the terminal prints the
+// same words in the same order, and a window that re-derived them from raw
+// numbers would be a second opinion on how a receipt reads. The separator is
+// the window's business: the terminal joins with a dot, a browser can lay the
+// parts out differently, and neither needs the transport to choose.
+type Receipt struct {
+	Fields []string `json:"fields,omitempty"`
+}
 
 // Facts is what the page prints before anything has happened: the version, the
 // directory it is working in and the model it will ask. All three come from the
@@ -70,14 +97,26 @@ type Options struct {
 	// browser build leaves it nil and the route answers 501, which is the
 	// signal the page uses to offer a path field instead.
 	Picker Picker
+
+	// Compact runs a manual compaction. Nil means this build cannot compact,
+	// and the route says so instead of pretending the command did nothing.
+	Compact Compact
+
+	// SideTurn runs one prompt on the side conversation. It is a second Turn
+	// rather than a flag on the first because the two conversations have two
+	// agents: routing by which one is "current" would put that state in the
+	// transport, where a reload loses it.
+	SideTurn Turn
 }
 
 // Server is a loopback HTTP endpoint for one conversation.
 type Server struct {
-	turn   Turn
-	facts  Facts
-	host   Host
-	picker Picker
+	turn     Turn
+	compact  Compact
+	sideTurn Turn
+	facts    Facts
+	host     Host
+	picker   Picker
 
 	broker    *broker
 	approvals *approvals
@@ -88,6 +127,11 @@ type Server struct {
 	// because the window can be clicked twice faster than a turn finishes and
 	// a queue would replay the same prompt later with no way to see it coming.
 	running atomic.Bool
+
+	// sideRunning is the same latch for the side conversation, and it is
+	// separate on purpose: the two agents run concurrently, so a turn on one
+	// must not be refused because the other is busy.
+	sideRunning atomic.Bool
 
 	listener net.Listener
 	http     *http.Server
@@ -100,6 +144,8 @@ type Server struct {
 func New(options Options) *Server {
 	server := &Server{
 		turn:      options.Turn,
+		compact:   options.Compact,
+		sideTurn:  options.SideTurn,
 		facts:     options.Facts,
 		host:      options.Host,
 		picker:    options.Picker,
@@ -115,6 +161,11 @@ func New(options Options) *Server {
 	server.mux.HandleFunc("GET /api/events", server.serveEvents)
 	server.mux.HandleFunc("POST /api/ask", server.serveAsk)
 	server.mux.HandleFunc("POST /api/approval", server.serveApproval)
+	server.mux.HandleFunc("POST /api/compact", server.serveCompact)
+	server.mux.HandleFunc("GET /api/side", server.serveSide)
+	server.mux.HandleFunc("POST /api/side", server.serveSideOpen)
+	server.mux.HandleFunc("POST /api/side/ask", server.serveSideAsk)
+	server.mux.HandleFunc("POST /api/side/close", server.serveSideClose)
 	if options.Host != nil {
 		server.mountHost()
 	}
@@ -317,8 +368,8 @@ func (s *Server) runTurn(prompt string) {
 	defer s.running.Store(false)
 
 	s.publishStatus(statusEvent{Running: true})
-	err := s.turn(context.Background(), prompt, s.emit)
-	done := statusEvent{Running: false}
+	receipt, err := s.turn(context.Background(), prompt, s.emit)
+	done := statusEvent{Running: false, Receipt: receipt.Fields}
 	if err != nil {
 		done.Error = err.Error()
 	}
@@ -341,9 +392,14 @@ func (s *Server) emit(event wire.AgentEvent) error {
 // ended" is not something the agent protocol says — a reader that only knows
 // wire.AgentEvent would have to infer it from agent_end, which a cancelled or
 // failed turn never sends.
+//
+// The receipt rides on the same frame as "not running" because the two are one
+// message to the reader: the turn stopped, and here is what it cost. Sent
+// separately, a window would have to decide which of the two arrived first.
 type statusEvent struct {
-	Running bool   `json:"running"`
-	Error   string `json:"error,omitempty"`
+	Running bool     `json:"running"`
+	Error   string   `json:"error,omitempty"`
+	Receipt []string `json:"receipt,omitempty"`
 }
 
 func (s *Server) publishStatus(status statusEvent) {

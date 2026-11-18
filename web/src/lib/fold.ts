@@ -11,7 +11,7 @@
 
 import type { AgentEvent, TranscriptBlock } from "../api";
 
-export type Role = "user" | "answer" | "thinking" | "tool" | "notice" | "error";
+export type Role = "user" | "answer" | "thinking" | "tool" | "notice" | "error" | "receipt";
 
 export interface Block {
   id: number;
@@ -213,19 +213,21 @@ export function apply(blocks: Block[], event: AgentEvent): FoldResult {
     }
 
     case "compaction_start": {
-      const reason = event.reason === "overflow" ? "overflow" : event.reason || "threshold";
+      const why = event.reason === "overflow" ? "上下文溢出" : event.reason === "manual" ? "手动" : "接近上限";
       const [next] = openBlock(closeOpen(blocks), "notice", {
-        text: `compacting (${reason})…`,
+        text: `正在压缩上下文（${why}）…`,
       });
       return { blocks: next };
     }
 
     case "compaction_end": {
       const next = closeOpen(blocks);
-      const block = blank("notice", {
-        text: event.aborted ? "compaction aborted" : "context compacted",
-      });
-      return { blocks: [...next, block] };
+      const text = event.errorMessage
+        ? `压缩失败：${withoutCompactionLabel(event.errorMessage)}`
+        : event.aborted
+          ? "压缩已中止"
+          : `上下文已压缩：${compactionTokens(event.result)}`;
+      return { blocks: [...next, blank("notice", { text })] };
     }
 
     case "agent_end":
@@ -236,9 +238,62 @@ export function apply(blocks: Block[], event: AgentEvent): FoldResult {
   }
 }
 
-/** notice appends a shell-level line into the transcript. */
-export function notice(blocks: Block[], role: "notice" | "error", text: string): Block[] {
+/**
+ * compactionTokens is what the compaction measured: how much went in, and the
+ * estimate of what is left.
+ *
+ * The terminal prints the same pair ("compacted 120000 tokens into 30000"), and
+ * a window that said only "compacted" would leave the reader guessing whether it
+ * did anything at all — the second half of the pair is the whole point of asking
+ * for it. The payload rides on the event's result key, the same unmarshaled
+ * wire.CompactionResult the tool events use, so nothing here has to be taught a
+ * second shape.
+ */
+function compactionTokens(value: unknown): string {
+  if (value === null || typeof value !== "object") return "";
+  const payload = value as { tokensBefore?: unknown; estimatedTokensAfter?: unknown };
+  const before = typeof payload.tokensBefore === "number" ? payload.tokensBefore : 0;
+  if (before <= 0) return "";
+  const after = typeof payload.estimatedTokensAfter === "number" ? payload.estimatedTokensAfter : 0;
+  const count = (tokens: number) => tokens.toLocaleString("en-US");
+  return after > 0 ? `${count(before)} → ${count(after)} tokens` : `${count(before)} → ? tokens`;
+}
+
+/**
+ * withoutCompactionLabel drops the kernel's own English label from a failed
+ * compaction's message.
+ *
+ * The kernel builds the message as "<label>: <cause>", where the label is
+ * "Compaction failed" for a manual one and "Auto-compaction failed" for the
+ * threshold trigger — it is the terminal's wording, and the terminal prints it
+ * verbatim. The window says the same thing in Chinese one line above, so keeping
+ * the label would report one failure as "压缩失败：Compaction failed: …".
+ *
+ * A message with no known label is passed through untouched: this is a display
+ * rule, and a kernel that changes its wording should show up as a longer line,
+ * not as a swallowed error.
+ */
+function withoutCompactionLabel(message: string): string {
+  for (const label of ["Compaction failed: ", "Auto-compaction failed: "]) {
+    if (message.startsWith(label)) return message.slice(label.length);
+  }
+  return message;
+}
+
+/** notice appends a shell-level line into the transcript. */export function notice(blocks: Block[], role: "notice" | "error", text: string): Block[] {
   return [...blocks, blank(role, { text })];
+}
+
+/**
+ * receipt appends what the turn cost under the turn it belongs to.
+ *
+ * It is a block rather than a status-bar fact because it is about the turn that
+ * just ended, not about now: the terminal prints the same line as a note, and a
+ * reader scrolling back should find it where the answer is. A turn that spent
+ * nothing arrives with no fields at all and leaves no line behind.
+ */
+export function receipt(blocks: Block[], fields: string[]): Block[] {
+  return fields.length === 0 ? blocks : [...blocks, blank("receipt", { text: fields.join(" · ") })];
 }
 
 /** prompt appends the reader's own message. */

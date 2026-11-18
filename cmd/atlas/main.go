@@ -27,6 +27,7 @@ import (
 	"pi-go/internal/app"
 	"pi-go/internal/assembly"
 	"pi-go/internal/config"
+	"pi-go/internal/cost"
 	"pi-go/internal/permission"
 	"pi-go/internal/provider/faux"
 	"pi-go/internal/rpc"
@@ -475,9 +476,9 @@ func runTurn(ctx context.Context, render *renderer, run func(context.Context, fu
 	turnCtx, stop := signal.NotifyContext(ctx, os.Interrupt)
 	defer stop()
 
-	timer := newTurnTimer()
+	timer := cost.NewTimer()
 	result, err := run(turnCtx, func(event wire.AgentEvent) error {
-		timer.observe(event)
+		timer.Observe(event)
 		return render.event(event)
 	})
 	if err != nil {
@@ -485,12 +486,12 @@ func runTurn(ctx context.Context, render *renderer, run func(context.Context, fu
 			// Ctrl-C: the kernel reports the cancellation as an error but still
 			// returns what it produced, so the turn ends quietly and the
 			// session keeps going.
-			render.summary(result, timer.cost())
+			render.summary(result, timer.Cost())
 			return nil
 		}
 		return err
 	}
-	render.summary(result, timer.cost())
+	render.summary(result, timer.Cost())
 	if result.StopReason != wire.StopError {
 		return nil
 	}

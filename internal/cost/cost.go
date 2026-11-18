@@ -1,10 +1,12 @@
-package main
-
-// What one turn cost, in the two units a reader asks about: tokens, and time.
-// It lives in the host rather than in the interface because only the host holds
+// Package cost measures what one turn spent, in the two units a reader asks
+// about: tokens, and time.
+//
+// It lives in the host rather than in an interface because only the host holds
 // both ends of the turn — the callback that starts it and the result that ends
-// it — and because the interface draws a frame per event and has no business
-// keeping a stopwatch of its own.
+// it — and because a window draws a frame per event and has no business keeping
+// a stopwatch of its own. The terminal and the desktop shell therefore print the
+// same numbers, in the same words, from this one implementation.
+package cost
 
 import (
 	"fmt"
@@ -15,8 +17,8 @@ import (
 	"pi-go/internal/wire"
 )
 
-// turnTimer measures the two halves of a turn's clock: all of it, and the part
-// the model spent writing.
+// Timer measures the two halves of a turn's clock: all of it, and the part the
+// model spent writing.
 //
 // The split is what keeps tokens per second honest. A turn that ran six tools
 // and wrote for two seconds did not write at output/duration — dividing by the
@@ -24,7 +26,7 @@ import (
 // about the tool and not about the model. The two numbers also check each
 // other: with no tool calls they nearly agree, so a rate that disagrees with
 // the duration says one of them is being measured wrong.
-type turnTimer struct {
+type Timer struct {
 	began   time.Time     // when the turn started
 	writing time.Time     // when the current assistant message started, zero between them
 	wrote   time.Duration // assistant messages that already ended
@@ -35,17 +37,18 @@ type turnTimer struct {
 	now func() time.Time
 }
 
-func newTurnTimer() *turnTimer {
-	timer := &turnTimer{now: time.Now}
+// NewTimer starts a turn's clock at the moment it is called.
+func NewTimer() *Timer {
+	timer := &Timer{now: time.Now}
 	timer.began = timer.now()
 	return timer
 }
 
-// observe notes when the model started and stopped writing. Only an assistant
+// Observe notes when the model started and stopped writing. Only an assistant
 // message is the model talking: the prompt and the tool results arrive as
 // messages too, and counting those would fold the tools' time back into the
 // rate.
-func (t *turnTimer) observe(event wire.AgentEvent) {
+func (t *Timer) Observe(event wire.AgentEvent) {
 	if event.Message == nil || event.Message.Role != wire.RoleAssistant {
 		return
 	}
@@ -60,8 +63,8 @@ func (t *turnTimer) observe(event wire.AgentEvent) {
 	}
 }
 
-// cost freezes what the timer saw into the numbers the front ends print.
-func (t *turnTimer) cost() turnCost {
+// Cost freezes what the timer saw into the numbers the front ends print.
+func (t *Timer) Cost() Cost {
 	ended := t.now()
 	wrote := t.wrote
 	if !t.writing.IsZero() {
@@ -71,22 +74,22 @@ func (t *turnTimer) cost() turnCost {
 		// them.
 		wrote += ended.Sub(t.writing)
 	}
-	return turnCost{Took: ended.Sub(t.began), Wrote: wrote, Ended: ended}
+	return Cost{Took: ended.Sub(t.began), Wrote: wrote, Ended: ended}
 }
 
-// turnCost is one turn's receipt. It is a value, not the timer, so both front
-// ends can print it after the turn is over without reaching back into a running
+// Cost is one turn's receipt. It is a value, not the timer, so every front end
+// can print it after the turn is over without reaching back into a running
 // clock.
-type turnCost struct {
+type Cost struct {
 	Took  time.Duration // wall clock, tools included
 	Wrote time.Duration // the part of it the model spent writing
 	Ended time.Time
 }
 
-// fields are the parts of the line, in reading order. Both front ends print the
-// same parts in the same order; only the separator between them differs, and it
-// differs because the two transcripts already read differently.
-func (c turnCost) fields(usage wire.Usage) []string {
+// Fields are the parts of the line, in reading order. Every front end prints
+// the same parts in the same order; only the separator between them differs,
+// and it differs because the transcripts already read differently.
+func (c Cost) Fields(usage wire.Usage) []string {
 	if usage.TotalTokens == 0 {
 		// Nothing was spent, so there is no cost to report, and the reader is
 		// left with the one word that explains the turn. A rejected request
@@ -101,13 +104,13 @@ func (c turnCost) fields(usage wire.Usage) []string {
 	}
 	// "took" rather than "completed in": a turn that failed or was cancelled
 	// prints this line too, and it did take that long.
-	return append(fields, "took "+humanDuration(c.Took), "ended at "+c.Ended.Format("15:04:05"))
+	return append(fields, "took "+HumanDuration(c.Took), "ended at "+c.Ended.Format("15:04:05"))
 }
 
-// line is the full-screen session's notice. It joins with the same dot the
+// Line is the full-screen session's notice. It joins with the same dot the
 // transcript already uses between a tool's outcome and its duration.
-func (c turnCost) line(usage wire.Usage) string {
-	return strings.Join(c.fields(usage), " · ")
+func (c Cost) Line(usage wire.Usage) string {
+	return strings.Join(c.Fields(usage), " · ")
 }
 
 // rate is output tokens per second of writing, in the precision the number
@@ -116,7 +119,7 @@ func (c turnCost) line(usage wire.Usage) string {
 //
 // It is omitted when the model wrote nothing, because "0 tok/s" under an empty
 // answer reads as a failure rather than as a turn that had no words in it.
-func (c turnCost) rate(output int) (string, bool) {
+func (c Cost) rate(output int) (string, bool) {
 	if output <= 0 || c.Wrote <= 0 {
 		return "", false
 	}
@@ -125,4 +128,19 @@ func (c turnCost) rate(output int) (string, bool) {
 		return fmt.Sprintf("%d tok/s", int(math.Round(value))), true
 	}
 	return fmt.Sprintf("%.1f tok/s", value), true
+}
+
+// HumanDuration is how long something took, in the unit a human would say it
+// in: milliseconds under a second, tenths under a minute, and a clock reading
+// past that. The receipt and the tool cards print the same spans, so the words
+// live here instead of once per front end.
+func HumanDuration(duration time.Duration) string {
+	switch {
+	case duration < time.Second:
+		return fmt.Sprintf("%dms", duration.Milliseconds())
+	case duration < time.Minute:
+		return fmt.Sprintf("%.1fs", duration.Seconds())
+	}
+	seconds := int(duration.Seconds())
+	return fmt.Sprintf("%dm%02ds", seconds/60, seconds%60)
 }

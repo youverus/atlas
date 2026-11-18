@@ -16,6 +16,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -28,6 +29,7 @@ import (
 	"github.com/wailsapp/wails/v3/pkg/application"
 
 	"pi-go/internal/assembly"
+	"pi-go/internal/cost"
 	"pi-go/internal/httpapi"
 	"pi-go/internal/webhost"
 	"pi-go/internal/wire"
@@ -40,7 +42,7 @@ import (
 // It is a var, not a const, so scripts/package.sh can stamp the release version
 // with -ldflags -X main.version=... and have the page, the facts and the app
 // bundle's Info.plist agree; -X cannot write to a const.
-var version = "0.2.3"
+var version = "0.4.10"
 
 func main() {
 	configPath := flag.String("config", "", "config file (default ~/.atlas/config.json)")
@@ -73,6 +75,11 @@ func main() {
 	shown := "offline"
 	var turn httpapi.Turn
 	var host httpapi.Host
+	// compact and sideTurn are the two actions the terminal has that the window
+	// did not. They stay nil in offline mode for the same reason turn is a
+	// script there: there is no kernel to compact and no second agent to ask.
+	var compact httpapi.Compact
+	var sideTurn httpapi.Turn
 
 	// server is written once, below, and read by the Ask closure from a tool
 	// goroutine mid-turn. The closure is the only way to break the cycle:
@@ -110,12 +117,16 @@ func main() {
 		}
 		directory, shown = kernel.Cwd, kernel.Selection.Name()
 		turn = kernelTurn(kernel)
+		compact = kernelCompact(kernel)
+		sideTurn = kernelSideTurn(kernel)
 		host = webhost.New(kernel)
 	}
 
 	server = httpapi.New(httpapi.Options{
-		Turn: turn,
-		Host: host,
+		Turn:     turn,
+		Compact:  compact,
+		SideTurn: sideTurn,
+		Host:     host,
 		// The chooser needs the application, which is created below because
 		// the window has to open the server's own URL. The struct is written
 		// once the application exists and read only after a page asks for it,
@@ -172,10 +183,52 @@ func main() {
 // kernelTurn hands the app's own Ask to the stream. Nothing is translated: the
 // events a window draws are the events the kernel emits, which is why the page
 // can read them by their wire names.
+//
+// The one thing added is the receipt, and it is measured here because this is
+// where both ends of the turn are: the timer sees every event go past, and the
+// result carries the usage. The same cost package prints the terminal's
+// receipt, so the two front ends cannot disagree about what a turn cost.
 func kernelTurn(kernel *assembly.Kernel) httpapi.Turn {
-	return func(ctx context.Context, prompt string, emit func(wire.AgentEvent) error) error {
-		_, err := kernel.App.Ask(ctx, wire.UserMessage(prompt), emit)
+	return func(ctx context.Context, prompt string, emit func(wire.AgentEvent) error) (httpapi.Receipt, error) {
+		timer := cost.NewTimer()
+		result, err := kernel.App.Ask(ctx, wire.UserMessage(prompt), func(event wire.AgentEvent) error {
+			timer.Observe(event)
+			return emit(event)
+		})
+		return httpapi.Receipt{Fields: timer.Cost().Fields(result.Usage)}, err
+	}
+}
+
+// kernelCompact runs the terminal's /compact through the same kernel call.
+//
+// No timer and no receipt: the numbers a reader sees come from the
+// compaction_end event the kernel already emits, and counting them twice would
+// let the two disagree about one compaction.
+func kernelCompact(kernel *assembly.Kernel) httpapi.Compact {
+	return func(ctx context.Context, note string, emit func(wire.AgentEvent) error) error {
+		_, err := kernel.App.Compact(ctx, note, emit)
 		return err
+	}
+}
+
+// kernelSideTurn asks the side conversation.
+//
+// The side is the kernel's, not the window's: it holds its own agent with a
+// snapshot of the main history, so this is the same translation kernelTurn is,
+// pointed at the other conversation. Cost is measured here for the same reason:
+// the timer sees every event go past and the result carries the usage.
+func kernelSideTurn(kernel *assembly.Kernel) httpapi.Turn {
+	return func(ctx context.Context, prompt string, emit func(wire.AgentEvent) error) (httpapi.Receipt, error) {
+		side := kernel.App.Side()
+		if side == nil {
+			return httpapi.Receipt{}, errors.New("no side conversation is open")
+		}
+		timer := cost.NewTimer()
+		result, err := side.Ask(ctx, wire.UserMessage(prompt), func(event wire.AgentEvent) error {
+			timer.Observe(event)
+			return emit(event)
+		})
+		return httpapi.Receipt{Fields: timer.Cost().Fields(result.Usage)}, err
 	}
 }
 
@@ -184,15 +237,23 @@ func kernelTurn(kernel *assembly.Kernel) httpapi.Turn {
 // it emits is a real wire.AgentEvent, so the page cannot tell it apart from a
 // provider until the text stops being a script.
 func offlineTurn() httpapi.Turn {
-	return func(ctx context.Context, prompt string, emit func(wire.AgentEvent) error) error {
-		if err := emit(wire.AgentEvent{Type: wire.AgentEventStart}); err != nil {
-			return err
+	return func(ctx context.Context, prompt string, emit func(wire.AgentEvent) error) (httpapi.Receipt, error) {
+		// The script feeds the same timer the real turn does, so the offline
+		// window draws a receipt with a rate that reflects its own sleeps
+		// rather than a hard-coded number.
+		timer := cost.NewTimer()
+		send := func(event wire.AgentEvent) error {
+			timer.Observe(event)
+			return emit(event)
 		}
-		if err := emit(wire.AgentEvent{
+		if err := send(wire.AgentEvent{Type: wire.AgentEventStart}); err != nil {
+			return httpapi.Receipt{}, err
+		}
+		if err := send(wire.AgentEvent{
 			Type:    wire.AgentEventMessageStart,
 			Message: &wire.Message{Role: "assistant"},
 		}); err != nil {
-			return err
+			return httpapi.Receipt{}, err
 		}
 
 		// Streamed word by word so the page paints incrementally: a single
@@ -203,22 +264,31 @@ func offlineTurn() httpapi.Turn {
 		for _, word := range strings.Fields(reply) {
 			select {
 			case <-ctx.Done():
-				return ctx.Err()
+				return httpapi.Receipt{}, ctx.Err()
 			default:
 			}
 			event := wire.AgentEvent{
 				Type:           wire.AgentEventMessageUpdate,
 				AssistantEvent: &wire.AssistantEvent{Type: wire.EventTextDelta, Delta: word + " "},
 			}
-			if err := emit(event); err != nil {
-				return err
+			if err := send(event); err != nil {
+				return httpapi.Receipt{}, err
 			}
 			time.Sleep(18 * time.Millisecond)
 		}
 
-		if err := emit(wire.AgentEvent{Type: wire.AgentEventMessageEnd}); err != nil {
-			return err
+		if err := send(wire.AgentEvent{Type: wire.AgentEventMessageEnd}); err != nil {
+			return httpapi.Receipt{}, err
 		}
-		return emit(wire.AgentEvent{Type: wire.AgentEventEnd})
+		// A script has no provider to report usage, so it counts what it wrote
+		// at the same quarter-of-a-character ratio the page estimates with. The
+		// point of the receipt here is that the offline window draws one.
+		usage := wire.Usage{
+			Input:       len(prompt)/4 + 1,
+			Output:      len(reply)/4 + 1,
+			TotalTokens: (len(prompt)+len(reply))/4 + 2,
+		}
+		receipt := httpapi.Receipt{Fields: timer.Cost().Fields(usage)}
+		return receipt, send(wire.AgentEvent{Type: wire.AgentEventEnd})
 	}
 }
