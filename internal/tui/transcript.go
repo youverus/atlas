@@ -1,7 +1,14 @@
 package tui
 
 import (
+	"strings"
+	"time"
+	"unicode"
+
+	xansi "github.com/charmbracelet/x/ansi"
+
 	"pi-go/internal/transcript"
+	"pi-go/internal/wire"
 )
 
 // The model is the transcript package's; these aliases only spare the renderers
@@ -33,7 +40,14 @@ const (
 // a different conversation.
 type Transcript struct {
 	*transcript.Transcript
-	md *markdown
+	md           *markdown
+	subagentRows map[string]subagentRow
+}
+
+type subagentRow struct {
+	index     int
+	state     string
+	delivered bool
 }
 
 // NewTranscript returns an empty transcript.
@@ -46,11 +60,90 @@ func NewTranscript() Transcript {
 // The clock survives: it is configuration, not content.
 func (t *Transcript) Reset() {
 	t.Transcript.Reset()
+	t.subagentRows = nil
 	if t.md != nil {
 		// The rows are still valid as markdown, but they are keyed by block
 		// index, and the indices now belong to a different conversation.
 		t.md.forget()
 	}
+}
+
+// Apply folds the agent stream and displays results delivered to this turn.
+func (t *Transcript) Apply(event wire.AgentEvent) {
+	if event.Type == wire.AgentEventSubagentUpdate && event.Subagent != nil {
+		t.showSubagent(*event.Subagent, true)
+		return
+	}
+	t.Transcript.Apply(event)
+}
+
+func subagentFinished(state string) bool {
+	return state != "" && state != "queued" && state != "running"
+}
+
+func (t *Transcript) showSubagent(update wire.SubagentUpdate, delivered bool) {
+	if update.ID == "" || update.State == "" {
+		return
+	}
+	row, exists := t.subagentRows[update.ID]
+	if !exists && !delivered {
+		// An observer update can outlive a branch. Its launch must still be in
+		// the live transcript, or the app must first deliver it to this branch.
+		if update.ToolCallID == "" || !t.hasSubagentCall(update.ToolCallID) {
+			return
+		}
+	}
+	if row.delivered || (!subagentFinished(update.State) && subagentFinished(row.state)) || (row.state == "running" && update.State == "queued") {
+		return
+	}
+	text := SubagentReportText(subagentStatusText(update))
+	if exists {
+		t.Update(row.index, func(block *Block) { block.Text = text })
+	} else {
+		row.index = t.Append(Block{Role: RoleNotice, Text: text})
+	}
+	row.state = update.State
+	row.delivered = delivered && subagentFinished(update.State)
+	if t.subagentRows == nil {
+		t.subagentRows = make(map[string]subagentRow)
+	}
+	t.subagentRows[update.ID] = row
+}
+
+func subagentStatusText(update wire.SubagentUpdate) string {
+	text := "Subagent @" + update.Role + " · " + update.State + " · " + update.ID
+	if description := strings.Join(strings.Fields(update.Description), " "); description != "" {
+		text += " · " + description
+	}
+	if duration := time.Duration(update.DurationMs) * time.Millisecond; duration >= time.Second {
+		text += " · " + duration.Truncate(time.Second).String()
+	}
+	for _, detail := range []string{update.Error, update.Report} {
+		if detail = strings.TrimSpace(detail); detail != "" {
+			text += "\n" + detail
+		}
+	}
+	return text
+}
+
+// SubagentReportText strips terminal controls while keeping report line breaks.
+func SubagentReportText(text string) string {
+	return strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) && r != '\n' && r != '\t' {
+			return -1
+		}
+		return r
+	}, xansi.Strip(text))
+}
+
+func (t *Transcript) hasSubagentCall(id string) bool {
+	blocks := t.Blocks()
+	for i := len(blocks) - 1; i >= 0; i-- {
+		if block := blocks[i]; block.Role == RoleTool && block.ID == id && block.Name == wire.SubagentToolName {
+			return true
+		}
+	}
+	return false
 }
 
 // revealChunkSpans is how many held-back stretches one scroll to the top of the

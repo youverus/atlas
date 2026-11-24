@@ -157,11 +157,23 @@ func TestDeleteFileRemovesTheSessionAndItsMark(t *testing.T) {
 		t.Fatalf("archive: %v", err)
 	}
 	path := manager.File()
+	if err := os.Mkdir(SubagentDir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(SubagentDir(path), "task.json"), []byte(`{"report":"evidence"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(ArtifactDir(path), "demo"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(ArtifactDir(path), "demo", "v1.dat"), []byte("<h1>demo</h1>"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 
 	if err := DeleteFile(path); err != nil {
 		t.Fatalf("delete: %v", err)
 	}
-	for _, gone := range []string{path, ArchiveMarker(path)} {
+	for _, gone := range []string{path, ArchiveMarker(path), SubagentDir(path), ArtifactDir(path)} {
 		if _, err := os.Stat(gone); !os.IsNotExist(err) {
 			t.Fatalf("%s survived the delete: %v", gone, err)
 		}

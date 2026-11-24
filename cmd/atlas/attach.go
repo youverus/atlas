@@ -1,21 +1,14 @@
 package main
 
-// "@path" in a typed line: what it means when the line is sent, and what the
-// palette offers while it is still being typed.
-//
-// Both halves live here because both are facts about how atlas reads a line, and
-// the interface draws whatever it is handed. The syntax is pi's: an "@" at the
-// start of a word introduces a path, a path with spaces in it goes inside double
-// quotes, and everything else is prose.
-//
-// The two halves also have to agree, which is the reason they sit in one file:
-// the candidate the palette fills in has to be a reference the sender will read
-// back, or Tab would produce a token that resolves to nothing.
+// File completion and attachment preparation for the two CLI input modes.
+// Batch input expands typed references. The TUI stages only explicitly picked
+// images and leaves every path visible in the submitted text.
 
 import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"unicode"
@@ -43,14 +36,6 @@ const (
 	attachCandidates = 40
 )
 
-// attachRef is one "@path" in a line: the runes it spans and the path as typed
-// with the quoting taken off.
-type attachRef struct {
-	start int    // rune offset of the '@'
-	end   int    // rune offset one past the last rune of the reference
-	token string // the path, without '@' and without quotes
-}
-
 // refBoundary reports whether the rune before an '@' puts that '@' at the start
 // of a word. Anything else — "bob@example.com" — is prose and stays prose.
 func refBoundary(r rune) bool {
@@ -65,9 +50,9 @@ func refBoundary(r rune) bool {
 // rather than guessed at: a path with a space in it that lost its closing quote
 // is a path the reader meant, and sending the sentence without it would answer a
 // question they did not ask.
-func parseAttachRefs(line string) ([]attachRef, error) {
+func parseAttachRefs(line string) ([]string, error) {
 	runes := []rune(line)
-	refs := make([]attachRef, 0, 1)
+	refs := make([]string, 0, 1)
 	for i := 0; i < len(runes); i++ {
 		if runes[i] != '@' || (i > 0 && !refBoundary(runes[i-1])) {
 			continue
@@ -84,7 +69,7 @@ func parseAttachRefs(line string) ([]attachRef, error) {
 				return nil, fmt.Errorf("@%s is missing its closing quote", string(runes[i+2:]))
 			}
 			if token := string(runes[i+2 : close]); token != "" {
-				refs = append(refs, attachRef{start: i, end: close + 1, token: token})
+				refs = append(refs, token)
 			}
 			i = close
 			continue
@@ -96,27 +81,10 @@ func parseAttachRefs(line string) ([]attachRef, error) {
 		if j == i+1 {
 			continue
 		}
-		refs = append(refs, attachRef{start: i, end: j, token: string(runes[i+1 : j])})
+		refs = append(refs, string(runes[i+1:j]))
 		i = j - 1
 	}
 	return refs, nil
-}
-
-// attachBlocks turns every reference in line into message content.
-func attachBlocks(line, cwd string) ([]wire.Content, error) {
-	refs, err := parseAttachRefs(line)
-	if err != nil {
-		return nil, err
-	}
-	var blocks []wire.Content
-	for _, ref := range refs {
-		made, err := attachFile(ref.token, cwd)
-		if err != nil {
-			return nil, err
-		}
-		blocks = append(blocks, made...)
-	}
-	return blocks, nil
 }
 
 // attachFile reads one referenced file and reports the blocks it becomes.
@@ -159,10 +127,7 @@ func attachFile(token, cwd string) ([]wire.Content, error) {
 	}
 	tag := fmt.Sprintf(`<file name="%s">`, absolute)
 	if mimeType := fs.ImageMimeType(data); mimeType != "" {
-		return []wire.Content{
-			wire.TextContent(tag + "</file>"),
-			wire.ImageContent(base64.StdEncoding.EncodeToString(data), mimeType),
-		}, nil
+		return attachedImage(tag, mimeType, data), nil
 	}
 	if len(data) > attachMaxTextBytes {
 		return nil, fmt.Errorf("@%s is %s; text is attached up to %s — ask for it to be read instead",
@@ -177,20 +142,90 @@ func stat(path string) bool {
 	return err == nil
 }
 
-// attachMessage builds the user message for a typed line.//
-// The line stays the first block, as typed. The tags that follow it are what the
-// references turned into, and keeping both is deliberate: the real user text is
-// what a later fork or export has to show, and the tags are what the model was
-// handed.
+// attachMessage expands typed file references for non-interactive input.
 func attachMessage(line, cwd string) (wire.Message, error) {
-	blocks, err := attachBlocks(line, cwd)
+	refs, err := parseAttachRefs(line)
 	if err != nil {
 		return wire.Message{}, err
 	}
-	if len(blocks) == 0 {
+	if len(refs) == 0 {
 		return wire.UserMessage(line), nil
 	}
-	return wire.UserMessageBlocks(append([]wire.Content{wire.TextContent(line)}, blocks...)...), nil
+	blocks := []wire.Content{wire.TextContent(line)}
+	for _, ref := range refs {
+		made, err := attachFile(ref, cwd)
+		if err != nil {
+			return wire.Message{}, err
+		}
+		blocks = append(blocks, made...)
+	}
+	return wire.UserMessageBlocks(blocks...), nil
+}
+
+func attachedImage(tag, mimeType string, data []byte) []wire.Content {
+	return []wire.Content{
+		wire.TextContent(tag + "</file>"),
+		wire.ImageContent(base64.StdEncoding.EncodeToString(data), mimeType),
+	}
+}
+
+// openAttachment opens a regular file. A directory or a device is not an image candidate.
+func openAttachment(path string) (*os.File, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("not a regular file")
+	}
+	return os.Open(path)
+}
+
+func isAttachImage(path string) bool {
+	file, err := openAttachment(path)
+	if err != nil {
+		return false
+	}
+	defer file.Close()
+	// The shared sniffer inspects only the leading bytes, including PNG chunk headers.
+	header, err := io.ReadAll(io.LimitReader(file, 8<<10))
+	return err == nil && fs.ImageMimeType(header) != ""
+}
+
+// interactiveMessage keeps paths in the text and reads only explicitly picked images.
+func interactiveMessage(line string, images []string) (wire.Message, error) {
+	if len(images) == 0 {
+		return wire.UserMessage(line), nil
+	}
+	blocks := []wire.Content{wire.TextContent(line)}
+	for _, path := range images {
+		image, err := readSelectedImage(path)
+		if err != nil {
+			return wire.Message{}, fmt.Errorf("attach image %q: %w", path, err)
+		}
+		blocks = append(blocks, image...)
+	}
+	return wire.UserMessageBlocks(blocks...), nil
+}
+
+func readSelectedImage(path string) ([]wire.Content, error) {
+	file, err := openAttachment(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	data, err := io.ReadAll(io.LimitReader(file, attachMaxImageBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > attachMaxImageBytes {
+		return nil, fmt.Errorf("exceeds %s", tool.FormatSize(attachMaxImageBytes))
+	}
+	mimeType := fs.ImageMimeType(data)
+	if mimeType == "" {
+		return nil, errors.New("no longer a supported image")
+	}
+	return attachedImage(fmt.Sprintf(`<file name="%s">`, path), mimeType, data), nil
 }
 
 // attachDir is the directory references resolve against: the session's, not the
@@ -206,8 +241,10 @@ func attachDir(application *app.App) string {
 // attachSite is the reference being typed at the end of the line: what follows
 // the '@', and where the '@' is.
 type attachSite struct {
-	typed string // what follows the '@', without an opening quote
-	start int    // rune offset of the '@'
+	typed  string // what follows the '@', without an opening quote
+	start  int    // rune offset of the '@'
+	quoted bool
+	closed bool
 }
 
 // attachSiteAt finds the reference the reader is still typing: the last '@' that
@@ -225,12 +262,13 @@ func attachSiteAt(line string) (attachSite, bool) {
 		rest := runes[i+1:]
 		if len(rest) > 0 && rest[0] == '"' {
 			inner := string(rest[1:])
-			if strings.ContainsRune(inner, '"') {
-				// The quote is closed, so the reference is finished and there is
-				// nothing left to complete.
-				return attachSite{}, false
+			if end := strings.IndexByte(inner, '"'); end >= 0 {
+				if end != len(inner)-1 || end == 0 {
+					return attachSite{}, false
+				}
+				return attachSite{typed: inner[:end], start: i, quoted: true, closed: true}, true
 			}
-			return attachSite{typed: inner, start: i}, true
+			return attachSite{typed: inner, start: i, quoted: true}, true
 		}
 		if strings.ContainsFunc(string(rest), unicode.IsSpace) {
 			return attachSite{}, false
@@ -247,11 +285,20 @@ func attachSiteAt(line string) (attachSite, bool) {
 // walking the whole repository on every keystroke would answer a question they
 // did not ask while making the keyboard feel heavy.
 func attachSuggestions(line, cwd string) []tui.Suggestion {
+	return attachSuggestionsFor(line, cwd, false)
+}
+
+func attachSuggestionsFor(line, cwd string, subagents bool) []tui.Suggestion {
 	site, ok := attachSiteAt(line)
 	if !ok {
 		return nil
 	}
-	replace := len([]rune(line)) - site.start
+	runes := []rune(line)
+	replace := len(runes) - site.start
+	var out []tui.Suggestion
+	if subagents && !site.quoted {
+		out = subagentSuggestions(string(runes[:site.start]), site.typed, replace)
+	}
 	dir, base := splitAttachPath(site.typed)
 	root := cwd
 	if dir != "" {
@@ -259,12 +306,14 @@ func attachSuggestions(line, cwd string) []tui.Suggestion {
 	}
 	entries, err := os.ReadDir(root)
 	if err != nil {
-		return nil
+		return out
 	}
 	prefix := strings.ToLower(base)
-	out := make([]tui.Suggestion, 0, len(entries))
 	for _, entry := range entries {
 		name := entry.Name()
+		if site.closed && (entry.IsDir() || name != base) {
+			continue
+		}
 		if !strings.HasPrefix(strings.ToLower(name), prefix) {
 			continue
 		}
@@ -276,11 +325,39 @@ func attachSuggestions(line, cwd string) []tui.Suggestion {
 		if len(out) == attachCandidates {
 			break
 		}
-		out = append(out, tui.Suggestion{
-			Name:    attachName(dir, name, entry.IsDir()),
-			About:   attachAbout(entry),
-			Replace: replace,
-		})
+		candidate := attachName(dir, name, entry.IsDir())
+		if site.closed || subagents && len(wire.SubagentRoles(strings.TrimRight(candidate, "\"'`"))) > 0 {
+			candidate = `@"` + dir + name + `"`
+		}
+		pick := tui.Suggestion{Name: candidate, About: attachAbout(entry), Replace: replace}
+		if !entry.IsDir() {
+			pick.Path = fs.ResolvePath(dir+name, cwd)
+		}
+		out = append(out, pick)
+	}
+	return out
+}
+
+func subagentSuggestions(before, typed string, replace int) []tui.Suggestion {
+	if !strings.HasPrefix(wire.SubagentExplorer, typed) && !strings.HasPrefix(wire.SubagentVerifier, typed) {
+		return nil
+	}
+	// Earlier roles cannot stand in for the reference being completed. Preserve
+	// quoted path markers so the shared parser can skip them.
+	roles := strings.NewReplacer("@"+wire.SubagentExplorer, "@x", "@"+wire.SubagentVerifier, "@x")
+	probe := roles.Replace(before) + "@" + wire.SubagentExplorer
+	if len(wire.SubagentRoles(probe)) == 0 {
+		return nil
+	}
+	var out []tui.Suggestion
+	for _, role := range []tui.Suggestion{
+		{Name: wire.SubagentExplorer, About: "subagent · explore code and trace callers", Replace: replace},
+		{Name: wire.SubagentVerifier, About: "subagent · verify a claim against evidence", Replace: replace},
+	} {
+		if strings.HasPrefix(role.Name, typed) {
+			role.Name = "@" + role.Name
+			out = append(out, role)
+		}
 	}
 	return out
 }

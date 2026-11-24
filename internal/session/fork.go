@@ -2,6 +2,8 @@ package session
 
 import (
 	"fmt"
+	"io/fs"
+	"os"
 	"path/filepath"
 	"sort"
 )
@@ -126,6 +128,11 @@ func (m *Manager) CreateBranchedSession(leafID string) (string, error) {
 		if err := SaveFile(m.file, &File{Header: header, Entries: entries}); err != nil {
 			return "", err
 		}
+		if previousFile != "" {
+			if err := copyDirIfExists(ArtifactDir(previousFile), ArtifactDir(m.file)); err != nil {
+				return "", err
+			}
+		}
 		m.flushed = true
 	} else {
 		m.flushed = false
@@ -170,10 +177,47 @@ func ForkFrom(sourcePath, targetCwd, dir string, options Options) (*Manager, err
 	if err := CreateFile(manager.file, &File{Header: manager.header, Entries: source.Entries}); err != nil {
 		return nil, err
 	}
+	if err := copyDirIfExists(ArtifactDir(resolvedSource), ArtifactDir(manager.file)); err != nil {
+		return nil, err
+	}
 	manager.entries = source.Entries
 	manager.buildIndex()
 	manager.flushed = true
 	return manager, nil
+}
+
+func copyDirIfExists(src, dst string) error {
+	info, err := os.Stat(src)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("session: stat %s: %w", src, err)
+	}
+	if !info.IsDir() {
+		return nil
+	}
+	return filepath.WalkDir(src, func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.Type()&fs.ModeSymlink != 0 {
+			return nil
+		}
+		rel, err := filepath.Rel(src, path)
+		if err != nil {
+			return err
+		}
+		target := filepath.Join(dst, rel)
+		if entry.IsDir() {
+			return os.MkdirAll(target, 0o755)
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		return os.WriteFile(target, data, 0o644)
+	})
 }
 
 // sameID reports whether two optional entry ids point at the same value.

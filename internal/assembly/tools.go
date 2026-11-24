@@ -2,8 +2,10 @@ package assembly
 
 import (
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"pi-go/internal/app"
@@ -20,27 +22,85 @@ import (
 	"pi-go/internal/tool/web"
 )
 
-// WebTools builds the search and fetch tools from the web block.
+// WebTools builds deepseek_web_search and deepseek_web_fetch.
 //
-// A missing credential is a warning, not an error. The two tools are an addition
-// to a conversation, not a condition for having one, and a config shared between
-// machines where only one of them exports the key should still start. Saying it
-// once at startup is the honest form: the tools then do not exist for this
-// session, so every later turn agrees with the warning instead of discovering it
-// through calls that were never on the tool list.
-func WebTools(block *config.Web, spill *tool.Spill) ([]tool.Tool, string) {
-	if block == nil {
+// When config.json provides a web block, its baseUrl and credential take
+// precedence. When the web block is omitted (or targets DeepSeek's official
+// origin without its own credential), WebTools falls back to the official
+// DeepSeek API key from providers or DEEPSEEK_API_KEY so the search and fetch
+// tools work out of the box across CLI and desktop sessions.
+func WebTools(cfg *config.Config, spill *tool.Spill) ([]tool.Tool, string) {
+	var block *config.Web
+	if cfg != nil {
+		block = cfg.Web
+	}
+	if block != nil {
+		baseURL := strings.TrimSpace(block.BaseURL)
+		key := strings.TrimSpace(block.Key())
+		if key == "" && (baseURL == "" || isOfficialDeepSeekOrigin(baseURL)) {
+			key = defaultDeepSeekWebAPIKey(cfg)
+		}
+		if key == "" {
+			hint := "set apiKey"
+			if block.APIKeyEnv != "" {
+				hint = "export " + block.APIKeyEnv + " or set apiKey"
+			}
+			return nil, fmt.Sprintf("web tools are off: web has no credential; %s", hint)
+		}
+		return web.Tools(web.Options{BaseURL: baseURL, APIKey: key, Spill: spill}), ""
+	}
+	key := defaultDeepSeekWebAPIKey(cfg)
+	if key == "" {
 		return nil, ""
 	}
-	key := block.Key()
-	if key == "" {
-		hint := "set apiKey"
-		if block.APIKeyEnv != "" {
-			hint = "export " + block.APIKeyEnv + " or set apiKey"
+	return web.Tools(web.Options{BaseURL: web.DefaultBaseURL, APIKey: key, Spill: spill}), ""
+}
+
+func defaultDeepSeekWebAPIKey(cfg *config.Config) string {
+	if cfg != nil {
+		if prov, ok := cfg.Providers["deepseek"]; ok && isOfficialDeepSeekProvider("deepseek", prov) {
+			if key := strings.TrimSpace(prov.Key()); key != "" {
+				return key
+			}
 		}
-		return nil, fmt.Sprintf("web tools are off: web has no credential; %s", hint)
+		names := make([]string, 0, len(cfg.Providers))
+		for name := range cfg.Providers {
+			if name == "deepseek" {
+				continue
+			}
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			prov := cfg.Providers[name]
+			if isOfficialDeepSeekProvider(name, prov) {
+				if key := strings.TrimSpace(prov.Key()); key != "" {
+					return key
+				}
+			}
+		}
 	}
-	return web.Tools(web.Options{BaseURL: block.BaseURL, APIKey: key, Spill: spill}), ""
+	return strings.TrimSpace(os.Getenv("DEEPSEEK_API_KEY"))
+}
+
+func isOfficialDeepSeekProvider(name string, prov config.Provider) bool {
+	if strings.TrimSpace(prov.BaseURL) != "" {
+		return isOfficialDeepSeekOrigin(prov.BaseURL)
+	}
+	for _, m := range prov.Models {
+		if strings.TrimSpace(m.BaseURL) != "" && isOfficialDeepSeekOrigin(m.BaseURL) {
+			return true
+		}
+	}
+	return name == "deepseek"
+}
+
+func isOfficialDeepSeekOrigin(raw string) bool {
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return false
+	}
+	return (parsed.Scheme == "https" || parsed.Scheme == "http") && strings.EqualFold(parsed.Hostname(), "api.deepseek.com")
 }
 
 // SandboxNote says whether the configured sandbox is in effect here, and what to
@@ -147,6 +207,11 @@ func denyReadFor(block *config.Sandbox) []string {
 // run. The classifier is still built from config.json, because "which mode" and
 // "which model judges" are different questions and only the first one is per run.
 func PermissionFor(cfg *config.Config, sandboxActive bool, session config.Selection, override string) (*permission.Engine, string) {
+	opts, note := permissionOptions(cfg, sandboxActive, session, override)
+	return permission.New(opts), note
+}
+
+func permissionOptions(cfg *config.Config, sandboxActive bool, session config.Selection, override string) (permission.Options, string) {
 	var (
 		store *permission.Store
 		note  string
@@ -158,10 +223,9 @@ func PermissionFor(cfg *config.Config, sandboxActive bool, session config.Select
 			note = loadErr.Error()
 		}
 	}
-	mode := permission.ModeBypass
+	mode := configuredPermissionMode(cfg)
 	autoAllow := false
 	if cfg != nil && cfg.Permission != nil {
-		mode = cfg.Permission.EffectiveMode()
 		autoAllow = cfg.Permission.AutoAllowBashIfSandboxed
 	}
 	if override != "" {
@@ -174,13 +238,20 @@ func PermissionFor(cfg *config.Config, sandboxActive bool, session config.Select
 		}
 		note += classifyNote
 	}
-	return permission.New(permission.Options{
+	return permission.Options{
 		Mode:                     mode,
 		Store:                    store,
 		SandboxEnabled:           sandboxActive,
 		AutoAllowBashIfSandboxed: autoAllow,
 		Classifier:               classifier,
-	}), note
+	}, note
+}
+
+func configuredPermissionMode(cfg *config.Config) string {
+	if cfg != nil && cfg.Permission != nil {
+		return cfg.Permission.EffectiveMode()
+	}
+	return permission.ModeBypass
 }
 
 // classifierFor builds the model that answers "auto" asks.

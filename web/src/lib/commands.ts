@@ -21,12 +21,15 @@
 // client, so a name cannot survive the removal of its handler without the
 // build failing on the switch in App.tsx.
 
-export interface Command {
-  /** The name as typed, leading slash included. */
+export interface PaletteItem {
   name: string;
-  /** What follows it, or empty when the command takes no argument. */
-  usage: string;
   summary: string;
+  usage?: string;
+}
+
+export interface Command extends PaletteItem {
+  /** What follows the command name, or empty when it takes no argument. */
+  usage: string;
 }
 
 export const COMMANDS: Command[] = [
@@ -35,7 +38,11 @@ export const COMMANDS: Command[] = [
   { name: "/side", usage: "[off]", summary: "在右侧开一个临时对话，这一段不动" },
   { name: "/btw", usage: "[问题]", summary: "在侧对话里问一句，面板没开就先开" },
   { name: "/model", usage: "", summary: "打开设置，换模型或推理强度" },
-  { name: "/permission", usage: "", summary: "打开设置，换工具调用的审批档位" },
+  { name: "/permission", usage: "", summary: "打开权限面板，换工具调用的审批档位" },
+  { name: "/mcp", usage: "", summary: "打开 MCP 控制面板" },
+  { name: "/plugin", usage: "", summary: "打开插件面板，查看已安装插件及其贡献的 Skill / MCP" },
+  { name: "/browser", usage: "[网址]", summary: "打开浏览器面板，或在受控 Chrome 窗口打开指定网页" },
+  { name: "/skill", usage: "[名称 [说明]]", summary: "打开 Skill 面板，或加载指定 skill 发起对话" },
   { name: "/fork", usage: "", summary: "复制这段对话开一条新分支，可以给它起名" },
 ];
 
@@ -51,6 +58,45 @@ export function matches(draft: string): Command[] | null {
   if (!trimmed.startsWith("/")) return null;
   if (/\s/.test(trimmed)) return null;
   return COMMANDS.filter((command) => command.name.startsWith(trimmed));
+}
+
+const SUBAGENT_MENTIONS: PaletteItem[] = [
+  { name: "@explorer", summary: "跨文件查找实现和证据" },
+  { name: "@verifier", summary: "独立核对结论或改动" },
+];
+
+/** Find the bare role token at the caret, including letters to its right. */
+export function roleMatches(draft: string, caret: number) {
+  const prefix = /(?:^|\s)(@[a-z]*)$/.exec(draft.slice(0, caret))?.[1];
+  if (!prefix) return null;
+  const items = SUBAGENT_MENTIONS.filter((item) => item.name.startsWith(prefix));
+  if (items.length === 0) return null;
+  const tail = /^[a-z]*(?=$|[\s,，。:：；;、!?！？])/.exec(draft.slice(caret))?.[0];
+  const start = caret - prefix.length;
+  if (tail === undefined || !inPromptText(draft.slice(0, start))) return null;
+  return { start, end: caret + tail.length, items };
+}
+
+/** Check whether a mention sits outside quoted replies and Markdown code. */
+export function inPromptText(beforeMention: string): boolean {
+  let fence = "";
+  let inline = 0;
+  const lines = beforeMention.split("\n");
+  for (const [index, line] of lines.entries()) {
+    const trimmed = line.trimStart();
+    const marker = /^(```|~~~)/.exec(trimmed)?.[0];
+    if (marker || fence || trimmed.startsWith(">")) {
+      if (index === lines.length - 1) return false;
+      if (marker) fence = marker === fence ? "" : fence || marker;
+      continue;
+    }
+    for (const backticks of line.matchAll(/`+/g)) {
+      const width = backticks[0].length;
+      if (inline === width) inline = 0;
+      else if (inline === 0) inline = width;
+    }
+  }
+  return inline === 0;
 }
 
 /** parse splits a sent line into its command and the rest, or null when the

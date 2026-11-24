@@ -134,14 +134,14 @@ v1 四个根：
 认：
 
 - 顶层 `key: value` 单行标量，值两头的成对引号（`'` / `"`）去掉。
-- 顶层 `key: |` 与 `key: >` 块标量（`|` 保行、`>` 折行）——`description` 写长一点就会用上。
+- 顶层 `key: |` 与 `key: >` 块标量（`|` 保行、`>` 折行），也接受 `|-`、`|+`、`>-`、`>+`。Skill 描述会统一去掉首尾空白。
 - `#` 开头的整行注释，以及行尾 ` #…`（引号内的不算）。
 - 不认识的键**连同它下面的缩进块一起跳过**。这正是规范里 `metadata` 的位置：它是 string→string 的映射，写出来必然是一个缩进块，而扩展位的意思就是"读不懂也要能读下去"。
 
 不认，遇到就报错并带行号，不猜：
 
 - 锚点与别名（`&` / `*`）、流式集合（`[...]` / `{...}`）。
-- 认识的四个键（`name` / `description` / `allowed-tools` / `disallowed-tools`）上出现缩进续行。那是作者想要一个块，而只有 `|` 与 `>` 才是块，猜错的代价是一个被切坏的 description。
+- 认识的四个键（`name` / `description` / `allowed-tools` / `disallowed-tools`）的单行值后出现缩进续行。多行值需要在字段行上显式写出块标记。
 - 一个缩进行上面没有任何键：这份文件的结构不是这里读的那种。
 
 报错那句话要说清是什么，而不只是"parse error"：`这是 YAML 的一个子集；把 description 写成单行或 | 块标量`。用户看得懂就能自己修，看不懂就会去查一个我们不支持的规范。
@@ -178,6 +178,8 @@ v1 四个根：
 3. 目录为空时**整段不出现**。一个空的 `<available_skills/>` 是一句关于功能的话，不是关于任务的话，而提示词里的每个字都在占预算。
 
 `-no-skills` 开关与 `-no-context-files` 对称：关掉之后提示词逐字节等于今天。这不是为了灵活，是让"skill 有没有污染默认提示词"这件事可测——`TestAProjectWithoutContextFilesGetsThePlainPrompt`（`cmd/atlas/context_test.go`）已经是同型的断言：没有上下文文件的目录拿到的提示词与 `builtinPrompt` 逐字节相同。`-no-skills` 要的就是这一条。
+
+桌面 Skill 开关按名称保存到 `$ATLAS_HOME/capabilities.json`。停用后，该 Skill 从后续系统提示词的目录中移除，`/skill` 拒绝调用，设置仍可预览和重新启用。
 
 ## 8. 模型怎么加载
 

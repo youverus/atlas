@@ -32,15 +32,20 @@ if [[ -n $unformatted ]]; then
 fi
 ok "gofmt"
 
+DESKTOP_TAGS=()
+if [[ $(uname -s) == Darwin ]]; then
+    DESKTOP_TAGS=(-tags private_mac_apis)
+fi
+
 step "desktop: go vet"
-CGO_ENABLED=1 go vet ./...
+CGO_ENABLED=1 go vet "${DESKTOP_TAGS[@]}" ./...
 ok "go vet"
 
 # -o /dev/null rather than a plain build: the module root is a main package, so
 # `go build` would drop a 17 MB executable next to the sources and the gate
 # would recreate it on every run. The cli gate discards its binary the same way.
 step "desktop: go build"
-CGO_ENABLED=1 go build -o /dev/null .
+CGO_ENABLED=1 go build "${DESKTOP_TAGS[@]}" -o /dev/null .
 ok "go build"
 
 # The replace directive is what keeps the shell on the working tree instead of a

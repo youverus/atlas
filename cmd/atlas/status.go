@@ -287,7 +287,7 @@ func toolGroupOf(name string) string {
 		return "fs"
 	case "bash":
 		return "bash"
-	case "websearch", "webfetch":
+	case "deepseek_web_search", "deepseek_web_fetch", "websearch", "webfetch":
 		return "web"
 	case "git_status", "git_diff", "git_log", "git_show":
 		// One grant, like the web pair: nobody decides to allow a diff but not a
@@ -300,6 +300,9 @@ func toolGroupOf(name string) string {
 		// per column: a person allows "look at the background tasks", not one
 		// of the three verbs.
 		return "tasks"
+	}
+	if strings.HasPrefix(name, "browser_") {
+		return "browser"
 	}
 	// A remote tool is grouped by its server: the grant a reader made was "this
 	// server", not "this one of its forty tools", and listing them one per

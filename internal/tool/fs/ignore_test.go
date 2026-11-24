@@ -1,6 +1,9 @@
 package fs
 
-import "testing"
+import (
+	"os"
+	"testing"
+)
 
 func TestParseIgnoreLine(t *testing.T) {
 	tests := []struct {
@@ -46,7 +49,7 @@ func TestIgnoreStackIgnored(t *testing.T) {
 		".gitignore": "node_modules\ndist/\n*.log\n!keep.log\n/src/generated\n",
 	})
 	stack := newIgnoreStack()
-	pushed := stack.push(root, "")
+	pushed := stack.push(root, "", os.ReadFile)
 	if pushed != 1 {
 		t.Fatalf("expected one level pushed, got %d", pushed)
 	}
@@ -85,14 +88,14 @@ func TestIgnoreStackNestedPrecedence(t *testing.T) {
 		"sub/.gitignore": "!important.log\n",
 	})
 	stack := newIgnoreStack()
-	stack.push(root, "")
+	stack.push(root, "", os.ReadFile)
 
 	if !stack.ignored("a.log", false) {
 		t.Fatal("parent rule should ignore a.log")
 	}
 
 	sub := root + "/sub"
-	level := stack.push(sub, "sub")
+	level := stack.push(sub, "sub", os.ReadFile)
 	if level != 1 {
 		t.Fatalf("expected the nested level to be pushed, got %d", level)
 	}
@@ -113,7 +116,7 @@ func TestIgnoreStackNestedPrecedence(t *testing.T) {
 func TestIgnoreStackMissingFile(t *testing.T) {
 	root := newCwd(t, map[string]string{"a.txt": "x"})
 	stack := newIgnoreStack()
-	if pushed := stack.push(root, ""); pushed != 0 {
+	if pushed := stack.push(root, "", os.ReadFile); pushed != 0 {
 		t.Fatalf("a directory without .gitignore should push nothing, got %d", pushed)
 	}
 	if stack.ignored("a.txt", false) {

@@ -6,12 +6,19 @@ package assembly
 // "which endpoint answered" depend on which front end you opened.
 
 import (
+	"context"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"pi-go/internal/config"
+	"pi-go/internal/provider"
 	"pi-go/internal/provider/anthropic"
 	"pi-go/internal/provider/openai"
+	"pi-go/internal/wire"
 )
 
 func selection() config.Selection {
@@ -117,6 +124,122 @@ func TestBuildReturnsBothHalves(t *testing.T) {
 	}
 }
 
+func TestModelRequestTimesOutWaitingForHeaders(t *testing.T) {
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		<-release
+	}))
+	defer server.Close()
+	defer close(release)
+
+	choice := selection()
+	choice.Provider.BaseURL = server.URL
+	choice.Provider.APIKey = ""
+	adapter, err := adapterOf(choice)
+	if err != nil {
+		t.Fatal(err)
+	}
+	chat := adapter.(*openai.Provider)
+	model := ModelOf(choice)
+	transport := chat.Client.Transport.(*http.Transport).Clone()
+	if transport.ResponseHeaderTimeout <= 0 || chat.Client.Timeout != 0 {
+		t.Fatal("expected a timeout for response headers only")
+	}
+	transport.ResponseHeaderTimeout = 25 * time.Millisecond
+	chat.Client = &http.Client{Transport: transport}
+	stream, err := chat.Stream(t.Context(), provider.Request{
+		Model:    model,
+		Messages: []wire.Message{wire.UserMessage("hello")},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	message, _, err := provider.Collect(stream)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if message.StopReason != wire.StopError || !strings.Contains(message.ErrorMessage, "timeout awaiting response headers") {
+		t.Fatalf("expected a model timeout, got %s: %s", message.StopReason, message.ErrorMessage)
+	}
+}
+
+func TestModelStreamIdleTimeoutAfterHeaders(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		text     string
+		userStop bool
+	}{
+		{name: "headers and heartbeats only"},
+		{name: "stalls after partial reply", text: "partial reply"},
+		{name: "user stops the stream", userStop: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			disconnected := make(chan struct{})
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				defer close(disconnected)
+				w.Header().Set("Content-Type", "text/event-stream")
+				w.WriteHeader(http.StatusOK)
+				if test.text != "" {
+					fmt.Fprintf(w, "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":%q}}\n\n", test.text)
+				}
+				flusher := w.(http.Flusher)
+				flusher.Flush()
+				heartbeats := time.NewTicker(10 * time.Millisecond)
+				defer heartbeats.Stop()
+				for {
+					select {
+					case <-r.Context().Done():
+						return
+					case <-heartbeats.C:
+						fmt.Fprint(w, "event: ping\ndata: {\"type\":\"ping\"}\n\n")
+						flusher.Flush()
+					}
+				}
+			}))
+			defer server.Close()
+
+			choice := selection()
+			choice.Provider.API = anthropic.APIName
+			choice.Provider.BaseURL = server.URL
+			adapter, err := adapterOf(choice)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+			defer cancel()
+			stream, err := provider.WithStreamIdleTimeout(adapter, 100*time.Millisecond).Stream(ctx, provider.Request{
+				Model:    ModelOf(choice),
+				Messages: []wire.Message{wire.UserMessage("hello")},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if test.userStop {
+				cancel()
+			}
+			message, _, err := provider.Collect(stream)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if test.userStop {
+				if message.StopReason != wire.StopAborted || message.ErrorCode != "" {
+					t.Fatalf("user cancellation = %+v", message)
+				}
+			} else if ctx.Err() != nil || message.StopReason != wire.StopError || message.ErrorCode != wire.ErrorCodeStreamIdleTimeout {
+				t.Fatalf("expected a stream idle timeout, got %+v", message)
+			}
+			if message.Text() != test.text {
+				t.Fatalf("reply = %q, want %q", message.Text(), test.text)
+			}
+			select {
+			case <-disconnected:
+			case <-time.After(2 * time.Second):
+				t.Fatal("model HTTP request remained open")
+			}
+		})
+	}
+}
+
 // TestAdapterOfPassesTheThinkingDialect pins the wiring: the dialect is the
 // only thing that tells an adapter to send a vendor's thinking fields, and a
 // field dropped here would disable it without any error.
@@ -195,5 +318,62 @@ func TestCredentialNotice(t *testing.T) {
 	choice.Provider.APIKeyEnv = ""
 	if notice := CredentialNotice(choice); notice == "" {
 		t.Fatal("a provider without any credential must be reported")
+	}
+}
+
+func TestEffectiveBaseURLNormalizesAnthropicCompatibleEndpoints(t *testing.T) {
+	cases := []struct {
+		name    string
+		api     string
+		provURL string
+		modURL  string
+		want    string
+	}{
+		{
+			name:    "bare anthropic host adds /v1",
+			api:     anthropic.APIName,
+			provURL: "https://api.anthropic.com",
+			want:    "https://api.anthropic.com/v1",
+		},
+		{
+			name:    "local proxy without /v1 adds /v1",
+			api:     anthropic.APIName,
+			provURL: "http://localhost:4000",
+			want:    "http://localhost:4000/v1",
+		},
+		{
+			name:    "third party /anthropic SDK url adds /v1",
+			api:     anthropic.APIName,
+			provURL: "https://open.bigmodel.cn/api/anthropic",
+			want:    "https://open.bigmodel.cn/api/anthropic/v1",
+		},
+		{
+			name:    "model override ending in /messages strips suffix",
+			api:     anthropic.APIName,
+			provURL: "https://ignored.example.com/v1",
+			modURL:  "https://dashscope.aliyuncs.com/apps/anthropic/v1/messages",
+			want:    "https://dashscope.aliyuncs.com/apps/anthropic/v1",
+		},
+		{
+			name:    "openai bare path stays unchanged",
+			api:     openai.APIName,
+			provURL: "https://relay.example.com",
+			want:    "https://relay.example.com",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			choice := selection()
+			choice.Provider.API = tc.api
+			choice.Provider.BaseURL = tc.provURL
+			choice.Model.BaseURL = tc.modURL
+			if got := EffectiveBaseURL(choice); got != tc.want {
+				t.Fatalf("EffectiveBaseURL = %q, want %q", got, tc.want)
+			}
+			if got := ModelOf(choice).BaseURL; got != tc.want {
+				t.Fatalf("ModelOf.BaseURL = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }

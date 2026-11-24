@@ -31,6 +31,46 @@ func resolveToCwd(path, cwd string) string {
 	return filepath.Clean(filepath.Join(cwd, path))
 }
 
+// resolveAccess returns the path used by the read-only filesystem operations.
+func (s *shared) resolveAccess(name string) (string, error) {
+	if s.root == nil {
+		return s.resolve(name), nil
+	}
+	name = filepath.FromSlash(name)
+	if home, err := os.UserHomeDir(); err == nil {
+		name, _ = expandTilde(name, filepath.FromSlash(home))
+	}
+	if filepath.VolumeName(name) == "" && (name == "" || !os.IsPathSeparator(name[0])) {
+		return normalizeUnicodeSpaces(name), nil
+	}
+
+	// Use the absolute root name only to translate absolute arguments. The
+	// handle resolves the remaining components, including symlinks and "..".
+	base := filepath.Clean(s.root.Name())
+	if filepath.IsAbs(base) {
+		if name == base {
+			return ".", nil
+		}
+		if relative, ok := strings.CutPrefix(name, joinAccessPath(base, "")); ok {
+			relative = strings.TrimLeft(relative, string(filepath.Separator))
+			if relative == "" {
+				return ".", nil
+			}
+			return normalizeUnicodeSpaces(relative), nil
+		}
+	}
+	return "", &fs.PathError{Op: "resolve", Path: name, Err: errors.New("path is outside the tool root")}
+}
+
+// joinAccessPath preserves the components of dir so the root can resolve them
+// in order. filepath.Join would collapse "link/.." before following the link.
+func joinAccessPath(dir, name string) string {
+	if dir == "" || os.IsPathSeparator(dir[len(dir)-1]) {
+		return dir + name
+	}
+	return dir + string(filepath.Separator) + name
+}
+
 // ResolvePath turns a path a reader typed into the absolute one the filesystem
 // knows: "@", "~", relative paths, and the two spellings macOS disagrees with
 // itself about are all handled here.
@@ -82,7 +122,7 @@ func expandTilde(path, home string) (string, bool) {
 	if !strings.HasPrefix(path, "~/") && !strings.HasPrefix(path, "~"+string(filepath.Separator)) {
 		return path, false
 	}
-	return filepath.Join(home, path[2:]), true
+	return joinAccessPath(home, path[2:]), true
 }
 
 // normalizeUnicodeSpaces maps the unicode space variants that look identical to

@@ -28,19 +28,18 @@ type forkHost struct {
 	points  []ForkPoint
 	entries []string
 	names   []string
-	text    string
 	err     error
 }
 
 func (h *forkHost) ForkPoints() []ForkPoint { return h.points }
 
-func (h *forkHost) ForkSession(entryID, name string) (string, error) {
+func (h *forkHost) ForkSession(entryID, name string) error {
 	if h.err != nil {
-		return "", h.err
+		return h.err
 	}
 	h.entries = append(h.entries, entryID)
 	h.names = append(h.names, name)
-	return h.text, nil
+	return nil
 }
 
 // TestForkRoutePassesTheName covers both shapes the page sends: a name the
@@ -69,11 +68,11 @@ func TestForkRoutePassesTheName(t *testing.T) {
 	}
 }
 
-// TestForkRoutePassesTheEntryAndReturnsTheDraft is the point of the change: the
-// page names where to branch, and the kernel's answer carries the message that
-// was left behind so the input box can offer it back.
-func TestForkRoutePassesTheEntryAndReturnsTheDraft(t *testing.T) {
-	host := &forkHost{text: "second question"}
+// TestForkRoutePassesTheEntry is the point of the change: the page names the
+// answer to branch after, and the answer carries nothing else — the reply that
+// was kept is in the new session already, so there is no draft to hand back.
+func TestForkRoutePassesTheEntry(t *testing.T) {
+	host := &forkHost{}
 	server := projectServer(t, host, nil)
 
 	response := postJSON(t, server.URL+"/api/sessions/fork", `{"entryId":"e-2","name":"plan B"}`)
@@ -87,8 +86,8 @@ func TestForkRoutePassesTheEntryAndReturnsTheDraft(t *testing.T) {
 	if err := json.Unmarshal([]byte(readAll(t, response)), &body); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if !body.OK || body.Text != "second question" {
-		t.Fatalf("body = %+v, want ok with the draft", body)
+	if !body.OK {
+		t.Fatalf("body = %+v, want ok", body)
 	}
 }
 
@@ -97,7 +96,7 @@ func TestForkRoutePassesTheEntryAndReturnsTheDraft(t *testing.T) {
 func TestForkPointsRouteAnswersTheList(t *testing.T) {
 	host := &forkHost{points: []ForkPoint{
 		{Index: 0},
-		{EntryID: "e-1", Index: 1, Text: "hi"},
+		{EntryID: "e-1", Index: 1, Turn: 1, Text: "hi"},
 	}}
 	server := projectServer(t, host, nil)
 
@@ -112,8 +111,8 @@ func TestForkPointsRouteAnswersTheList(t *testing.T) {
 	if err := json.Unmarshal([]byte(readAll(t, response)), &points); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if len(points) != 2 || points[1].EntryID != "e-1" || points[1].Index != 1 {
-		t.Fatalf("points = %+v, want the two the host answered", points)
+	if len(points) != 2 || points[1].EntryID != "e-1" || points[1].Index != 1 || points[1].Turn != 1 {
+		t.Fatalf("points = %+v, want the two the host answered, the second with its turn", points)
 	}
 
 	empty := projectServer(t, &forkHost{}, nil)

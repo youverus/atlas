@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Module gate: the two web tools (websearch, webfetch).
+# Module gate: the two web tools (deepseek_web_search, deepseek_web_fetch).
 #
 # The same layering as fs and shell: a tool package may reach for tool and wire
 # and must stay on the standard library. The reason is sharper here than

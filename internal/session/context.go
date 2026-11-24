@@ -94,11 +94,14 @@ func EntryMessages(entry Entry) ([]wire.Message, error) {
 		if err != nil {
 			return nil, fmt.Errorf("session: custom message %s: %w", entry.ID, err)
 		}
-		return []wire.Message{{
-			Role:      wire.RoleUser,
-			Content:   content,
-			Timestamp: millis(entry.Timestamp),
-		}}, nil
+		message := wire.Message{Role: wire.RoleUser, Content: content, Timestamp: millis(entry.Timestamp)}
+		if entry.CustomType == wire.SubagentCompletion {
+			var update wire.SubagentUpdate
+			if json.Unmarshal(entry.Details, &update) == nil {
+				message.Subagent = &update
+			}
+		}
+		return []wire.Message{message}, nil
 	case TypeBranchSummary:
 		if entry.Summary == "" {
 			return nil, nil

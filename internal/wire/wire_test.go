@@ -11,6 +11,18 @@ import (
 	"pi-go/internal/wire"
 )
 
+func TestSubagentRolesSkipQuotedFilePaths(t *testing.T) {
+	for _, text := range []string{
+		`look at @"notes @explorer draft.md" and ask @verifier`,
+		`look at (@"notes \" @explorer draft.md") and ask @verifier`,
+		`@verifier look at @"notes @explorer draft`,
+	} {
+		if got := wire.SubagentRoles(text); !reflect.DeepEqual(got, []string{wire.SubagentVerifier}) {
+			t.Errorf("SubagentRoles(%q) = %v, want verifier", text, got)
+		}
+	}
+}
+
 func TestFixturesRoundTrip(t *testing.T) {
 	paths, err := filepath.Glob("../../testdata/wire/*.json")
 	if err != nil {

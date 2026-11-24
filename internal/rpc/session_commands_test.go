@@ -262,13 +262,14 @@ func TestServeGetForkMessagesAndFork(t *testing.T) {
 	var forkList struct {
 		Messages []struct {
 			EntryID string `json:"entryId"`
+			Turn    int    `json:"turn"`
 			Text    string `json:"text"`
 		} `json:"messages"`
 	}
 	h.success("get_fork_messages").data(t, &forkList)
 	if len(forkList.Messages) != 2 ||
-		forkList.Messages[0].Text != "first prompt" ||
-		forkList.Messages[1].Text != "second prompt" {
+		forkList.Messages[0].Text != "answer one" || forkList.Messages[0].Turn != 1 ||
+		forkList.Messages[1].Text != "answer two" || forkList.Messages[1].Turn != 2 {
 		t.Fatalf("fork messages = %+v", forkList.Messages)
 	}
 
@@ -278,16 +279,14 @@ func TestServeGetForkMessagesAndFork(t *testing.T) {
 		t.Fatalf("read original file: %v", err)
 	}
 
-	// Fork before the second prompt: keeps the first turn and returns the
-	// second prompt's text.
-	h.sendJSON(map[string]any{"id": "f1", "type": "fork", "entryId": forkList.Messages[1].EntryID})
+	// Fork after the first answer: keeps that turn and nothing else.
+	h.sendJSON(map[string]any{"id": "f1", "type": "fork", "entryId": forkList.Messages[0].EntryID})
 	forkResp := h.success("fork")
 	var forkOut struct {
-		Text      string `json:"text"`
-		Cancelled *bool  `json:"cancelled"`
+		Cancelled *bool `json:"cancelled"`
 	}
 	forkResp.data(t, &forkOut)
-	if forkOut.Text != "second prompt" || forkOut.Cancelled == nil || *forkOut.Cancelled {
+	if forkOut.Cancelled == nil || *forkOut.Cancelled {
 		t.Fatalf("fork data = %s", forkResp.Data)
 	}
 
@@ -364,15 +363,15 @@ func TestServeForkAbortsActiveTurnAndHandlesRoot(t *testing.T) {
 	h.success("prompt")
 	<-block.started
 
-	// Forking at the first entry while a tool is running aborts the active
-	// turn first and leaves the new session completely clean.
+	// Forking after the first answer while a tool is running aborts the active
+	// turn first, and the branch holds that turn and nothing after it: the
+	// interrupted second turn is not part of the conversation any more.
 	h.sendJSON(map[string]any{"id": "f1", "type": "fork", "entryId": firstEntry})
 	var forkOut struct {
-		Text      string `json:"text"`
-		Cancelled bool   `json:"cancelled"`
+		Cancelled bool `json:"cancelled"`
 	}
 	h.success("fork").data(t, &forkOut)
-	if forkOut.Text != "first" || forkOut.Cancelled {
+	if forkOut.Cancelled {
 		t.Fatalf("fork = %+v", forkOut)
 	}
 
@@ -382,8 +381,8 @@ func TestServeForkAbortsActiveTurnAndHandlesRoot(t *testing.T) {
 		MessageCount int  `json:"messageCount"`
 	}
 	h.success("get_state").data(t, &state)
-	if state.IsStreaming || state.MessageCount != 0 {
-		t.Fatalf("state after root fork = %+v, want idle and 0 messages", state)
+	if state.IsStreaming || state.MessageCount != 2 {
+		t.Fatalf("state after the fork = %+v, want idle and the first turn (2 messages)", state)
 	}
 }
 

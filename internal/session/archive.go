@@ -61,7 +61,13 @@ func Unarchive(path string) error {
 	return nil
 }
 
-// DeleteFile removes a session and its mark. The session goes first: a marker
+// SubagentDir returns the path of a session's background task records.
+func SubagentDir(path string) string { return path + ".subagents" }
+
+// ArtifactDir returns the path of a session's saved artifact directory.
+func ArtifactDir(path string) string { return path + ".artifacts" }
+
+// DeleteFile removes a session, its task records, its artifact directory, and its archive mark. The session goes first: a marker
 // whose session is gone is inert (nothing lists it), while a session whose
 // marker is gone is a live conversation the user asked to destroy.
 //
@@ -74,6 +80,12 @@ func DeleteFile(path string) error {
 	}
 	if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return fmt.Errorf("session: delete %s: %w", path, err)
+	}
+	if err := os.RemoveAll(SubagentDir(path)); err != nil {
+		return fmt.Errorf("session: delete background tasks for %s: %w", path, err)
+	}
+	if err := os.RemoveAll(ArtifactDir(path)); err != nil {
+		return fmt.Errorf("session: delete artifacts for %s: %w", path, err)
 	}
 	return Unarchive(path)
 }

@@ -5,7 +5,9 @@ package provider
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
+	"time"
 
 	"pi-go/internal/wire"
 )
@@ -42,6 +44,75 @@ type Stream interface {
 type Provider interface {
 	API() string
 	Stream(ctx context.Context, req Request) (Stream, error)
+}
+
+var errStreamIdleTimeout = errors.New("model response stream idle timeout")
+
+type idleTimeoutProvider struct {
+	Provider
+	timeout time.Duration
+}
+
+// WithStreamIdleTimeout bounds the wait for each decoded event from a provider
+// whose stream observes cancellation of its request context.
+func WithStreamIdleTimeout(p Provider, timeout time.Duration) Provider {
+	return idleTimeoutProvider{Provider: p, timeout: timeout}
+}
+
+func (p idleTimeoutProvider) Stream(ctx context.Context, req Request) (Stream, error) {
+	streamCtx, cancel := context.WithCancelCause(ctx)
+	stream, err := p.Provider.Stream(streamCtx, req)
+	if err != nil {
+		cancel(nil)
+		return nil, err
+	}
+	return &idleTimeoutStream{Stream: stream, ctx: streamCtx, cancel: cancel, timeout: p.timeout}, nil
+}
+
+type idleTimeoutStream struct {
+	Stream
+	ctx      context.Context
+	cancel   context.CancelCauseFunc
+	timeout  time.Duration
+	timedOut bool
+}
+
+func (s *idleTimeoutStream) Recv() (wire.AssistantEvent, error) {
+	if s.timedOut {
+		return wire.AssistantEvent{}, io.EOF
+	}
+	expired := make(chan struct{})
+	timer := time.AfterFunc(s.timeout, func() {
+		s.cancel(errStreamIdleTimeout)
+		close(expired)
+	})
+	event, err := s.Stream.Recv()
+	if timer.Stop() {
+		return event, err
+	}
+	<-expired
+	if context.Cause(s.ctx) != errStreamIdleTimeout {
+		return event, err
+	}
+	s.timedOut = true
+	timeoutErr := fmt.Errorf("%w after %s", errStreamIdleTimeout, s.timeout)
+	if event.Type != wire.EventError || event.Error == nil {
+		return wire.AssistantEvent{}, timeoutErr
+	}
+	// Adapters see the request context close and return an aborted message.
+	// Keep their partial output and usage while reporting the timeout.
+	message := event.Error.Clone()
+	message.StopReason = wire.StopError
+	message.ErrorCode = wire.ErrorCodeStreamIdleTimeout
+	message.ErrorMessage = timeoutErr.Error()
+	event.Reason = string(wire.StopError)
+	event.Error = &message
+	return event, nil
+}
+
+func (s *idleTimeoutStream) Close() error {
+	s.cancel(nil)
+	return s.Stream.Close()
 }
 
 // Collect drains a stream and returns the terminal assistant message plus every

@@ -147,3 +147,81 @@ func TestEmptyPathsAreDroppedOnRead(t *testing.T) {
 		t.Fatalf("list = %v, want only /tmp", list)
 	}
 }
+
+func TestAddNamedStoresAndUpdatesDisplayName(t *testing.T) {
+	s := store(t)
+	dir := t.TempDir()
+
+	added, err := s.AddNamed(dir, "  Core Service  ")
+	if err != nil {
+		t.Fatalf("add named: %v", err)
+	}
+	if added.Name != "Core Service" {
+		t.Fatalf("added.Name = %q, want %q", added.Name, "Core Service")
+	}
+
+	// Re-adding without a name keeps the stored custom name.
+	again, err := s.Add(dir)
+	if err != nil {
+		t.Fatalf("re-add without name: %v", err)
+	}
+	if again.Name != "Core Service" {
+		t.Fatalf("again.Name = %q, want preserved %q", again.Name, "Core Service")
+	}
+
+	// Re-adding with a new non-empty name updates the stored label.
+	renamed, err := s.AddNamed(dir, "Renamed Service")
+	if err != nil {
+		t.Fatalf("re-add with new name: %v", err)
+	}
+	if renamed.Name != "Renamed Service" {
+		t.Fatalf("renamed.Name = %q, want %q", renamed.Name, "Renamed Service")
+	}
+	list := s.List()
+	if len(list) != 1 || list[0].Name != "Renamed Service" {
+		t.Fatalf("persisted list = %+v, want one entry with updated name", list)
+	}
+}
+
+func TestRemoteProjectsAreIsolatedFromLocalPaths(t *testing.T) {
+	s := store(t)
+	localDir := t.TempDir()
+
+	if _, err := s.AddNamed(localDir, "Local Copy"); err != nil {
+		t.Fatalf("add local: %v", err)
+	}
+	if _, err := s.AddRemote("dev-1", localDir+"/", "Remote Copy"); err != nil {
+		t.Fatalf("add remote: %v", err)
+	}
+	if _, err := s.AddRemote("dev-2", "/home/ubuntu/workspace/", "GPU Work"); err != nil {
+		t.Fatalf("add non-existent remote path: %v", err)
+	}
+	if _, err := s.AddRemote("local", "/tmp", "Bad"); err == nil {
+		t.Fatal("AddRemote accepted local device id")
+	}
+	if _, err := s.AddRemote("dev-1", "relative/path", "Bad"); err == nil {
+		t.Fatal("AddRemote accepted relative path")
+	}
+
+	// Removing local copy must leave remote projects untouched.
+	if err := s.Remove(localDir); err != nil {
+		t.Fatalf("remove local: %v", err)
+	}
+	list := s.List()
+	if len(list) != 2 {
+		t.Fatalf("list after local remove = %+v, want 2 remote projects", list)
+	}
+	if list[0].DeviceID != "dev-1" || list[0].Path != localDir || list[0].Name != "Remote Copy" {
+		t.Fatalf("remote[0] = %+v", list[0])
+	}
+	if list[1].DeviceID != "dev-2" || list[1].Path != "/home/ubuntu/workspace" || list[1].Name != "GPU Work" {
+		t.Fatalf("remote[1] = %+v", list[1])
+	}
+
+	if err := s.RemoveForDevice("dev-1", localDir); err != nil {
+		t.Fatalf("remove remote dev-1: %v", err)
+	}
+	if len(s.List()) != 1 {
+		t.Fatalf("list after remote remove = %+v, want 1", s.List())
+	}
+}

@@ -76,6 +76,41 @@ func TestLoadMCPResolvesTheTwoFiles(t *testing.T) {
 	}
 }
 
+func TestLoadMCPUserSwitchesOverrideProjectAndDeclarations(t *testing.T) {
+	home := pluginHome(t, "review", `{"mcpServers":{"lint":{"command":"lint-server","enabled":false}}}`)
+	write(t, home, MCPFileName, `{"mcpServers":{
+	  "docs":{"url":"https://example.com/mcp","headers":{"Authorization":"${ATLAS_MCP_DISABLED_TOKEN}"}},
+	  "off":{"command":"true","enabled":false}
+	}}`)
+	cwd := mcpProject(t, `{"mcpServers":{"docs":{"enabled":true},"lint":{"enabled":false}}}`)
+	t.Setenv("ATLAS_MCP_DISABLED_TOKEN", "")
+	if err := os.Unsetenv("ATLAS_MCP_DISABLED_TOKEN"); err != nil {
+		t.Fatal(err)
+	}
+	for name, enabled := range map[string]bool{"docs": false, "lint": true, "removed": true} {
+		if err := SaveMCPEnabled(home, name, enabled); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	cfg, err := LoadMCP(home, cwd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(names(cfg.Servers), ","); got != "lint" {
+		t.Fatalf("enabled = %s, want lint", got)
+	}
+	if got := strings.Join(names(cfg.Disabled), ","); got != "docs,off" {
+		t.Fatalf("disabled = %s, want docs,off", got)
+	}
+	if len(cfg.Missing) != 0 {
+		t.Fatalf("missing = %v, want no startup warnings for disabled servers", cfg.Missing)
+	}
+	if got := cfg.Disabled[0].URL; got != "https://example.com/mcp" {
+		t.Fatalf("disabled server URL = %q, want original URL available for enabling", got)
+	}
+}
+
 // TestLoadMCPInfersTheType pins the rule that makes the entries portable: the
 // transport is what the fields say, and "type" is only a way to be explicit.
 func TestLoadMCPInfersTheType(t *testing.T) {

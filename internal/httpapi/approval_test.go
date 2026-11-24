@@ -77,7 +77,7 @@ func TestTheSecondAnswerForOneQuestionIsRefused(t *testing.T) {
 	httpServer := httptest.NewServer(server.Handler())
 	defer httpServer.Close()
 
-	server.approvals.add(Question{Subject: "s", Tool: "bash"})
+	server.approvals.add(t.Context(), Question{Subject: "s", Tool: "bash"})
 	post(t, httpServer, "/api/approval", `{"id":"a1","allowed":true}`, http.StatusNoContent)
 	post(t, httpServer, "/api/approval", `{"id":"a1","allowed":false}`, http.StatusConflict)
 }
@@ -89,7 +89,7 @@ func TestStateCarriesTheOpenQuestions(t *testing.T) {
 	httpServer := httptest.NewServer(server.Handler())
 	defer httpServer.Close()
 
-	server.approvals.add(Question{Subject: "writes /tmp/x", Tool: "write"})
+	server.approvals.add(t.Context(), Question{Subject: "writes /tmp/x", Tool: "write"})
 
 	response, err := http.DefaultClient.Get(httpServer.URL + "/api/state")
 	if err != nil {

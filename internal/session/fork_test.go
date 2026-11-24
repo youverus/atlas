@@ -2,6 +2,7 @@ package session
 
 import (
 	"encoding/json"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -226,5 +227,47 @@ func TestForkFromRejectsAnEmptySource(t *testing.T) {
 	}
 	if _, err := ForkFrom(writeFixture(t), t.TempDir(), "", Options{}); err == nil {
 		t.Fatal("forking an empty file succeeded")
+	}
+}
+
+func TestBranchedAndForkedSessionsCopyArtifactsIndependently(t *testing.T) {
+	source := newTestSession(t)
+	appendUser(t, source, "make chart")
+	appendAssistant(t, source, "created chart")
+
+	srcArt := filepath.Join(ArtifactDir(source.File()), "chart", "v1.dat")
+	if err := os.MkdirAll(filepath.Dir(srcArt), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(srcArt, []byte("<svg>v1</svg>"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	target := t.TempDir()
+	forked, err := ForkFrom(source.File(), target, target, Options{Clock: testClock()})
+	if err != nil {
+		t.Fatalf("ForkFrom: %v", err)
+	}
+	forkArt := filepath.Join(ArtifactDir(forked.File()), "chart", "v1.dat")
+	got, err := os.ReadFile(forkArt)
+	if err != nil || string(got) != "<svg>v1</svg>" {
+		t.Fatalf("forked artifact = %q, err = %v", got, err)
+	}
+
+	if err := os.WriteFile(forkArt, []byte("<svg>fork-edit</svg>"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	srcGot, err := os.ReadFile(srcArt)
+	if err != nil || string(srcGot) != "<svg>v1</svg>" {
+		t.Fatalf("source artifact mutated by fork: %q, err = %v", srcGot, err)
+	}
+
+	branchedPath, err := source.CreateBranchedSession("")
+	if err != nil {
+		t.Fatalf("CreateBranchedSession: %v", err)
+	}
+	branchArt := filepath.Join(ArtifactDir(branchedPath), "chart", "v1.dat")
+	if branchGot, err := os.ReadFile(branchArt); err != nil || string(branchGot) != "<svg>v1</svg>" {
+		t.Fatalf("branched artifact = %q, err = %v", branchGot, err)
 	}
 }

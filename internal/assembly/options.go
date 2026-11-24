@@ -1,5 +1,7 @@
 package assembly
 
+import "context"
+
 // Options is one assembled kernel: what the config file says, and what the
 // caller asked to override.
 //
@@ -55,6 +57,10 @@ type Options struct {
 	// NoMCP skips connecting the servers this config declares. It exists for a
 	// front end that wants a conversation without spawning child processes.
 	NoMCP bool
+
+	// EnableSubagents allows hosts that can receive background task completions
+	// to expose the subagent tool in their main conversations.
+	EnableSubagents bool
 }
 
 // Ask is one question about one tool call.
@@ -65,6 +71,8 @@ type Options struct {
 // sentence shown to the reader, and the tool name is what a "yes, and stop
 // asking" answer is remembered against.
 type Ask struct {
+	Context context.Context
+	Session string
 	Subject string
 	Tool    string
 }

@@ -1,6 +1,7 @@
 package transcript
 
 import (
+	"encoding/json"
 	"strings"
 
 	"pi-go/internal/wire"
@@ -27,21 +28,60 @@ const (
 // content or a made-up one.
 func Replay(messages []wire.Message) []Block {
 	results, calls := recordedCalls(messages)
+	completions := make(map[string]*wire.SubagentUpdate)
 	blocks := make([]Block, 0, len(messages))
+	var turnStart int64
+	var turnOutput int
+	var turnWroteMs int64
 	for _, message := range messages {
 		switch message.Role {
 		case wire.RoleUser:
+			if message.Timestamp > 0 {
+				turnStart = message.Timestamp
+			}
+			turnOutput = 0
+			turnWroteMs = 0
 			if text := replayPrompt(message); text != "" {
-				blocks = append(blocks, Block{Role: RoleUser, Text: text})
+				role := RoleUser
+				if message.Subagent != nil {
+					role = RoleNotice
+					completed := *message.Subagent
+					completed.SessionFile = ""
+					completions[completed.ToolCallID] = &completed
+				}
+				blocks = append(blocks, Block{Role: role, Text: text, Timestamp: message.Timestamp})
 			}
 		case wire.RoleAssistant:
-			blocks = replayAssistant(blocks, message, results)
+			if message.Usage != nil && message.Usage.Output > 0 && message.DurationMs != nil && *message.DurationMs > 0 {
+				turnOutput += message.Usage.Output
+				turnWroteMs += *message.DurationMs
+			}
+			var tokensPerSec float64
+			if turnOutput > 0 && turnWroteMs > 0 {
+				tokensPerSec = float64(turnOutput) / (float64(turnWroteMs) / 1000.0)
+			}
+			blocks = replayAssistant(blocks, message, results, turnStart, tokensPerSec)
 		case wire.RoleToolResult:
 			if message.ToolCallID != "" && calls[message.ToolCallID] {
 				// Already drawn on the branch of the call that produced it.
 				continue
 			}
 			blocks = append(blocks, replayOrphanResult(message))
+		}
+	}
+	for i := range blocks {
+		block := &blocks[i]
+		if block.Role != RoleTool || block.Name != wire.SubagentToolName {
+			continue
+		}
+		if completed := completions[block.ID]; completed != nil {
+			block.Subagent = completed
+			continue
+		}
+		var launched wire.SubagentUpdate
+		if json.Unmarshal(results[block.ID].Details, &launched) == nil && launched.ID != "" {
+			launched.SessionFile = ""
+			block.Subagent = &launched
 		}
 	}
 	return blocks
@@ -98,7 +138,15 @@ func attachmentTag(text string) bool {
 }
 
 // replayAssistant appends what one turn produced, in the order it produced it.
-func replayAssistant(blocks []Block, message wire.Message, results map[string]wire.Message) []Block {
+func replayAssistant(blocks []Block, message wire.Message, results map[string]wire.Message, turnStart int64, tokensPerSec float64) []Block {
+	completedAt := message.Timestamp
+	var durationMs int64
+	if turnStart > 0 && completedAt >= turnStart {
+		durationMs = completedAt - turnStart
+	}
+	if durationMs == 0 && message.DurationMs != nil && *message.DurationMs > 0 {
+		durationMs = *message.DurationMs
+	}
 	for _, block := range message.Content.Items() {
 		switch block.Type {
 		case wire.ContentText:
@@ -106,13 +154,28 @@ func replayAssistant(blocks []Block, message wire.Message, results map[string]wi
 			if strings.TrimSpace(text) == "" {
 				continue
 			}
-			blocks = append(blocks, Block{Role: RoleAnswer, Text: text})
+			blocks = append(blocks, Block{
+				Role:         RoleAnswer,
+				Text:         text,
+				Timestamp:    completedAt,
+				DurationMs:   durationMs,
+				TokensPerSec: tokensPerSec,
+			})
 		case wire.ContentToolCall:
 			blocks = append(blocks, replayCall(block, results))
 		}
 	}
-	if message.StopReason == wire.StopError && message.ErrorMessage != "" {
-		blocks = append(blocks, Block{Role: RoleError, Text: message.ErrorMessage})
+	if message.StopReason == wire.StopAborted {
+		blocks = append(blocks, Block{Role: RoleNotice, Text: "interrupted", Timestamp: completedAt})
+	} else if message.StopReason == wire.StopError || message.ErrorMessage != "" {
+		blocks = append(blocks, Block{
+			Role:         RoleError,
+			Text:         message.ErrorMessage,
+			ErrorCode:    message.ErrorCode,
+			Timestamp:    completedAt,
+			DurationMs:   durationMs,
+			TokensPerSec: tokensPerSec,
+		})
 	}
 	return blocks
 }
@@ -137,7 +200,9 @@ func replayCall(call wire.Content, results map[string]wire.Message) Block {
 		}
 	}
 	outcome := "done"
-	if result.IsErrorResult() {
+	if result.Interrupted {
+		outcome = "interrupted"
+	} else if result.IsErrorResult() {
 		outcome = "failed"
 	}
 	block := Block{
@@ -150,6 +215,11 @@ func replayCall(call wire.Content, results map[string]wire.Message) Block {
 	}
 	if result.IsErrorResult() {
 		block.Detail = truncate(result.Text(), 2000)
+	} else if !result.Interrupted && wire.IsArtifactProducer(call.Name) && len(result.Details) > 0 {
+		var ref wire.ArtifactRef
+		if json.Unmarshal(result.Details, &ref) == nil && ref.ID != "" {
+			block.Artifact = &ref
+		}
 	}
 	return block
 }

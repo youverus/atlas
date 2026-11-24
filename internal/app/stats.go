@@ -64,6 +64,7 @@ func (a *App) SessionStats() (SessionStats, error) {
 		stats.Cost += u.Cost.Total
 	}
 
+	accounted := make(map[string]bool)
 	for _, entry := range a.manager.Entries() {
 		switch entry.Type {
 		case session.TypeUsage, session.TypeBranchSummary, session.TypeCompaction:
@@ -71,6 +72,9 @@ func (a *App) SessionStats() (SessionStats, error) {
 				var u wire.Usage
 				if err := json.Unmarshal(entry.Usage, &u); err == nil {
 					addUsage(u)
+					if entry.Type == session.TypeUsage && entry.Kind == wire.SubagentToolName {
+						accounted[entry.Note] = true
+					}
 				}
 			}
 		case session.TypeMessage:
@@ -99,6 +103,18 @@ func (a *App) SessionStats() (SessionStats, error) {
 						addUsage(*msg.Usage)
 					}
 				}
+			}
+		}
+	}
+	if a.subagents != nil {
+		updates, err := a.subagents.Completed(stats.SessionID, stats.SessionFile)
+		if err != nil {
+			return SessionStats{}, err
+		}
+		for _, update := range updates {
+			if update.Usage != nil && !accounted[update.ID] {
+				addUsage(*update.Usage)
+				accounted[update.ID] = true
 			}
 		}
 	}

@@ -74,7 +74,8 @@ func TestReplaySkipsThinkingAndKeepsAFailure(t *testing.T) {
 				wire.ToolCallContent("c1", "read", json.RawMessage(`{"path":"missing"}`)),
 			),
 			StopReason:   wire.StopError,
-			ErrorMessage: "provider timed out",
+			ErrorMessage: "message did not fit",
+			ErrorCode:    wire.ErrorCodeContextOverflow,
 		},
 		{
 			Role:       wire.RoleToolResult,
@@ -95,8 +96,21 @@ func TestReplaySkipsThinkingAndKeepsAFailure(t *testing.T) {
 	if blocks[0].Detail != "no such file" {
 		t.Fatalf("detail = %q, want the failure body", blocks[0].Detail)
 	}
-	if blocks[1].Role != RoleError || blocks[1].Text != "provider timed out" {
+	if blocks[1].Role != RoleError || blocks[1].Text != "message did not fit" || blocks[1].ErrorCode != wire.ErrorCodeContextOverflow {
 		t.Fatalf("error = %+v", blocks[1])
+	}
+}
+
+func TestReplayKeepsAnInterruptedReplyAndItsNotice(t *testing.T) {
+	blocks := Replay([]wire.Message{{
+		Role:         wire.RoleAssistant,
+		StopReason:   wire.StopAborted,
+		Content:      wire.NewBlocks(wire.TextContent("partial reply")),
+		ErrorMessage: "request aborted",
+	}})
+	if len(blocks) != 2 || blocks[0].Role != RoleAnswer || blocks[0].Text != "partial reply" ||
+		blocks[1].Role != RoleNotice || blocks[1].Text != "interrupted" {
+		t.Fatalf("interrupted blocks = %+v", blocks)
 	}
 }
 
@@ -114,5 +128,91 @@ func TestReplayKeepsThePromptLineAndDropsTheAttachmentBody(t *testing.T) {
 	blocks := Replay([]wire.Message{message})
 	if len(blocks) != 1 || blocks[0].Text != "what is this?" {
 		t.Fatalf("blocks = %+v, want only the typed line", blocks)
+	}
+}
+
+func TestReplayCarriesCompletionTimestampAndDuration(t *testing.T) {
+	dur := int64(420)
+	durFirst := int64(2000)
+	messages := []wire.Message{
+		{Role: wire.RoleUser, Content: wire.NewTextList("hi"), Timestamp: 10_000},
+		{
+			Role:       wire.RoleAssistant,
+			Content:    wire.NewBlocks(wire.TextContent("hello")),
+			Timestamp:  12_450,
+			DurationMs: &durFirst,
+			Usage:      &wire.Usage{Output: 100},
+		},
+		{Role: wire.RoleAssistant, Content: wire.NewBlocks(wire.TextContent("extra")), DurationMs: &dur},
+	}
+
+	blocks := Replay(messages)
+	if len(blocks) != 3 {
+		t.Fatalf("blocks = %d, want 3", len(blocks))
+	}
+	if blocks[1].Timestamp != 12_450 || blocks[1].DurationMs != 2_450 {
+		t.Fatalf("first answer timing = (%d, %d), want (12450, 2450)", blocks[1].Timestamp, blocks[1].DurationMs)
+	}
+	if blocks[1].TokensPerSec != 50 {
+		t.Fatalf("first answer tokens/sec = %v, want 50", blocks[1].TokensPerSec)
+	}
+	if blocks[2].DurationMs != 420 {
+		t.Fatalf("second answer duration = %d, want 420", blocks[2].DurationMs)
+	}
+}
+
+func TestArtifactRefPreservedInLiveAndReplayedTranscript(t *testing.T) {
+	ref := wire.ArtifactRef{
+		ID:      "sales-chart",
+		Kind:    "html",
+		Title:   "Sales Chart",
+		Version: 2,
+		Bytes:   512,
+		Action:  "patch",
+	}
+	details, err := json.Marshal(ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	messages := []wire.Message{
+		wire.UserMessage("build chart"),
+		{
+			Role:    wire.RoleAssistant,
+			Content: wire.NewBlocks(wire.ToolCallContent("c1", wire.ArtifactPatchToolName, json.RawMessage(`{"id":"sales-chart"}`))),
+		},
+		{
+			Role:       wire.RoleToolResult,
+			ToolCallID: "c1",
+			ToolName:   wire.ArtifactPatchToolName,
+			Content:    wire.NewBlocks(wire.TextContent(`Updated artifact "sales-chart" -> v2`)),
+			Details:    details,
+		},
+	}
+	replayed := Replay(messages)
+	if len(replayed) != 2 || replayed[1].Artifact == nil || replayed[1].Artifact.ID != "sales-chart" || replayed[1].Artifact.Version != 2 {
+		t.Fatalf("replayed artifact = %+v", replayed)
+	}
+
+	live := New()
+	live.Apply(wire.AgentEvent{
+		Type:       wire.AgentEventToolExecStart,
+		ToolCallID: "c1",
+		ToolName:   wire.ArtifactPatchToolName,
+		Args:       json.RawMessage(`{"id":"sales-chart"}`),
+	})
+	liveResult, _ := json.Marshal(map[string]any{
+		"content": []wire.Content{wire.TextContent(`Updated artifact "sales-chart" -> v2`)},
+		"details": ref,
+	})
+	live.Apply(wire.AgentEvent{
+		Type:       wire.AgentEventToolExecEnd,
+		ToolCallID: "c1",
+		ToolName:   wire.ArtifactPatchToolName,
+		Result:     liveResult,
+	})
+	blocks := live.Blocks()
+	if len(blocks) != 1 || blocks[0].Artifact == nil || blocks[0].Artifact.ID != "sales-chart" || blocks[0].Artifact.Version != 2 {
+		t.Fatalf("live artifact = %+v", blocks)
 	}
 }

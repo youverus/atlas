@@ -26,10 +26,12 @@ var SideReadOnly = map[string]bool{
 	// The git tools belong here for the same reason the file readers do: they
 	// only read, and the argv whitelist is what makes that true rather than
 	// promised.
-	"git_status": true,
-	"git_diff":   true,
-	"git_log":    true,
-	"git_show":   true,
+	"git_status":    true,
+	"git_diff":      true,
+	"git_log":       true,
+	"git_show":      true,
+	"artifact_list": true,
+	"artifact_read": true,
 }
 
 // The two things the model is told when a call did not run. Both are one line:
@@ -142,6 +144,9 @@ type Gate struct {
 	// session is the conversation the questions and the rememberings belong to.
 	// It is read through a function because /resume replaces the manager.
 	session func() string
+	// questionSession optionally identifies the session path/key carried in Ask
+	// so multi-session hosts can route approvals back to the originating view.
+	questionSession func() string
 }
 
 // NewGate is the gate for a front end that owns the engine itself. /permission
@@ -182,15 +187,41 @@ func (g *Gate) SetSession(session func() string) {
 	g.session = session
 }
 
+// SetQuestionSession sets the identifier placed in Ask.Session when asking the
+// reader (for example, the session file path in a multi-session host).
+func (g *Gate) SetQuestionSession(session func() string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.questionSession = session
+}
+
+// CloneForSession returns an independent Gate sharing the same permission
+// engine and reader ask hook, scoped to its own session functions.
+func (g *Gate) CloneForSession(session, questionSession func() string) *Gate {
+	if g == nil {
+		return &Gate{session: session, questionSession: questionSession}
+	}
+	g.mu.Lock()
+	ask, note := g.ask, g.note
+	g.mu.Unlock()
+	return &Gate{
+		engine:          g.engine,
+		ask:             ask,
+		note:            note,
+		session:         session,
+		questionSession: questionSession,
+	}
+}
+
 // BeforeToolCall is app.Config.BeforeToolCall: the gate that enforces the
 // permission ladder in the main conversation and the read-only boundary in the
 // side conversation.
 func (g *Gate) BeforeToolCall(ctx context.Context, call tool.Call) (*agent.Block, error) {
 	g.mu.Lock()
-	typing, ask, session := g.typing, g.ask, g.session
+	typing, ask, session, questionSession := g.typing, g.ask, g.session, g.questionSession
 	g.mu.Unlock()
 
-	approve := g.approveFunc(ask, session)
+	approve := g.approveWithSession(ctx, ask, session, questionSession)
 	if typing {
 		if g.engine != nil {
 			if decision := g.engine.Decide(call); decision.Behavior == permission.Deny {
@@ -224,6 +255,10 @@ func (g *Gate) BeforeToolCall(ctx context.Context, call tool.Call) (*agent.Block
 // approveFunc is the gate the questions go through: a remembered answer first,
 // then the reader.
 func (g *Gate) approveFunc(ask func(Ask) Answer, session func() string) func(tool.Call) bool {
+	return g.approveWithSession(context.Background(), ask, session, nil)
+}
+
+func (g *Gate) approveWithSession(ctx context.Context, ask func(Ask) Answer, session, questionSession func() string) func(tool.Call) bool {
 	if ask == nil {
 		return nil
 	}
@@ -238,7 +273,19 @@ func (g *Gate) approveFunc(ask func(Ask) Answer, session func() string) func(too
 		if g.engine != nil && g.engine.AllowedForSession(id, call.Name) {
 			return true
 		}
-		reply := ask(Ask{Subject: ApprovalSubject(call), Tool: call.Name})
+		askSession := id
+		if questionSession != nil {
+			if qID := questionSession(); qID != "" {
+				askSession = qID
+			}
+		}
+		if ctx.Err() != nil {
+			return false
+		}
+		reply := ask(Ask{Context: ctx, Session: askSession, Subject: ApprovalSubject(call), Tool: call.Name})
+		if ctx.Err() != nil {
+			return false
+		}
 		if reply.Allowed && reply.Always {
 			g.allowed.Remember(id, call.Name)
 			if g.engine != nil {

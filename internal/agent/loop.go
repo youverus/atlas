@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"sync"
+	"time"
 
 	"pi-go/internal/provider"
 	"pi-go/internal/wire"
@@ -91,9 +92,14 @@ func (a *Agent) Run(ctx context.Context, prompts []wire.Message, emit func(wire.
 			}
 
 			em.emit(turnEndEvent(assistant, results))
-			pending = a.steering()
+			if ctx.Err() == nil {
+				pending = a.steering()
+			}
 		}
 
+		if ctx.Err() != nil {
+			break
+		}
 		if followUp := a.followUp(); len(followUp) > 0 {
 			pending = followUp
 			continue
@@ -107,15 +113,21 @@ func (a *Agent) Run(ctx context.Context, prompts []wire.Message, emit func(wire.
 
 // streamTurn performs one provider request and emits the message lifecycle.
 func (a *Agent) streamTurn(ctx context.Context, em *emitter) wire.Message {
+	turnStarted := time.Now()
 	request := provider.Request{
 		Model:    a.cfg.Model,
 		Messages: a.requestMessages(),
 		Options:  provider.Options{ThinkingLevel: a.cfg.ThinkingLevel},
 	}
-	stream, err := a.cfg.Provider.Stream(ctx, request)
+	var stream provider.Stream
+	err := ctx.Err()
+	if err == nil {
+		stream, err = a.cfg.Provider.Stream(ctx, request)
+	}
 	if err != nil {
 		// Nothing was assembled: the request never became a stream.
 		message := a.failure(nil, failureReason(ctx), err.Error())
+		stampAssistantTiming(&message, turnStarted)
 		em.emit(messageEvent(wire.AgentEventMessageStart, message))
 		em.emit(messageEvent(wire.AgentEventMessageEnd, message))
 		return message
@@ -135,6 +147,7 @@ func (a *Agent) streamTurn(ctx context.Context, em *emitter) wire.Message {
 		}
 		if err != nil {
 			message := a.failure(assembled, failureReason(ctx), err.Error())
+			stampAssistantTiming(&message, turnStarted)
 			if !started {
 				em.emit(messageEvent(wire.AgentEventMessageStart, message))
 			}
@@ -175,17 +188,29 @@ func (a *Agent) streamTurn(ctx context.Context, em *emitter) wire.Message {
 
 	if final == nil {
 		message := a.failure(assembled, wire.StopError, "provider stream ended without a terminal event")
+		stampAssistantTiming(&message, turnStarted)
 		if !started {
 			em.emit(messageEvent(wire.AgentEventMessageStart, message))
 		}
 		em.emit(messageEvent(wire.AgentEventMessageEnd, message))
 		return message
 	}
+	stampAssistantTiming(final, turnStarted)
 	if !started {
 		em.emit(messageEvent(wire.AgentEventMessageStart, *final))
 	}
 	em.emit(messageEvent(wire.AgentEventMessageEnd, *final))
 	return *final
+}
+
+func stampAssistantTiming(message *wire.Message, started time.Time) {
+	if message == nil {
+		return
+	}
+	message.Timestamp = wire.Now()
+	if message.DurationMs == nil {
+		message.DurationMs = wire.Ptr(time.Since(started).Milliseconds())
+	}
 }
 
 func (a *Agent) requestMessages() []wire.Message {

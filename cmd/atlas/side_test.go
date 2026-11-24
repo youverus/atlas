@@ -41,7 +41,7 @@ func runSideCommand(t *testing.T, application *app.App, state *sideState, line s
 	t.Helper()
 	out := &bytes.Buffer{}
 	render := newRenderer(out, out, false)
-	done, err := replCommand(context.Background(), application, state, line, models{}, newSessionPicker(application, ""), nil, emptyPrompts(), out, render, mcpState{}, nil, nil)
+	done, err := replCommand(context.Background(), application, state, line, models{}, newSessionPicker(application, ""), nil, emptyPrompts(), out, render, mcpState{}, nil)
 	if done {
 		t.Fatalf("%s ended the session", line)
 	}

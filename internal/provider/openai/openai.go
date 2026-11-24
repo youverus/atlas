@@ -164,13 +164,34 @@ func (p *Provider) endpoint(model wire.Model) string {
 }
 
 func (p *Provider) baseURL(model wire.Model) string {
+	var raw string
 	switch {
 	case model.BaseURL != "":
-		return strings.TrimRight(model.BaseURL, "/")
+		raw = model.BaseURL
 	case p.Compat.BaseURL != "":
-		return strings.TrimRight(p.Compat.BaseURL, "/")
+		raw = p.Compat.BaseURL
 	default:
 		return defaultBaseURL
+	}
+	return normalizeDeepSeekBaseURL(raw)
+}
+
+// normalizeDeepSeekBaseURL repairs DeepSeek Anthropic-path URLs when used with
+// openai-completions so endpoint()+"/chat/completions" reaches /v1/chat/completions.
+func normalizeDeepSeekBaseURL(raw string) string {
+	trimmed := strings.TrimRight(strings.TrimSpace(raw), "/")
+	parsed, err := url.Parse(trimmed)
+	if err != nil || !strings.EqualFold(parsed.Hostname(), "api.deepseek.com") {
+		return trimmed
+	}
+	path := strings.TrimRight(strings.ToLower(parsed.Path), "/")
+	switch path {
+	case "/anthropic", "/anthropic/v1":
+		parsed.Path = "/v1"
+		parsed.RawPath = ""
+		return parsed.String()
+	default:
+		return trimmed
 	}
 }
 

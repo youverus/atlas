@@ -30,7 +30,7 @@ func runGoalCommand(t *testing.T, application *app.App, pick chooser, turn turnR
 	t.Helper()
 	out := &bytes.Buffer{}
 	render := newRenderer(out, out, false)
-	done, err := replCommand(context.Background(), application, nil, line, models{}, newSessionPicker(application, ""), pick, emptyPrompts(), out, render, mcpState{}, nil, turn)
+	done, err := replCommand(context.Background(), application, nil, line, models{}, newSessionPicker(application, ""), pick, emptyPrompts(), out, render, mcpState{}, turn)
 	if done {
 		t.Fatalf("%s ended the session", line)
 	}

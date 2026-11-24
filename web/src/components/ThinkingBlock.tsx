@@ -4,8 +4,8 @@ import type { Block } from "../lib/fold";
 // Reasoning is folded by default. It is the working, not the answer: a reader
 // who wants it can open it, and a reader who does not should never have to
 // scroll past it to reach the reply.
-export function ThinkingBlock({ block }: { block: Block }) {
-  const [open, setOpen] = useState(false);
+export function ThinkingBlock({ block, defaultOpen = false }: { block: Block; defaultOpen?: boolean }) {
+  const [open, setOpen] = useState(defaultOpen);
 
   return (
     <div className="thinking">

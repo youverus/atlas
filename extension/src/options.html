@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <title>Atlas 扩展设置</title>
+    <style>
+      :root { color-scheme: light dark; }
+      body {
+        font: 14px/1.6 -apple-system, "PingFang SC", "Segoe UI", sans-serif;
+        max-width: 560px;
+        margin: 40px auto;
+        padding: 0 24px;
+      }
+      h1 { font-size: 18px; }
+      .field { margin-bottom: 16px; }
+      label { display: block; margin-bottom: 4px; font-weight: 600; }
+      input {
+        width: 100%; box-sizing: border-box; padding: 8px 10px;
+        border: 1px solid rgba(128,128,128,.4); border-radius: 8px;
+        font-family: ui-monospace, monospace; font-size: 13px;
+        background: transparent; color: inherit;
+      }
+      .hint { color: gray; font-size: 12px; margin-top: 4px; }
+      .row { display: flex; gap: 8px; align-items: center; }
+      button {
+        padding: 8px 16px; border-radius: 8px; border: none; cursor: pointer;
+        background: #3b6ef6; color: #fff; font-size: 14px;
+      }
+      button:disabled { opacity: .6; cursor: default; }
+      .status { font-size: 13px; min-height: 20px; }
+      .status.ok { color: #1a7f37; }
+      .status.err { color: #c62828; }
+    </style>
+  </head>
+  <body>
+    <h1>Atlas 浏览器扩展</h1>
+    <p>连接本机运行的 Atlas（桌面端或 <code>atlas -serve</code>）。</p>
+    <div class="field">
+      <label for="baseUrl">服务地址</label>
+      <input id="baseUrl" placeholder="http://127.0.0.1:7788" />
+      <div class="hint">桌面端默认端口 7788；被占用时会回退到随机端口，以桌面端设置页显示的地址为准。</div>
+    </div>
+    <div class="field">
+      <label>一键配对（推荐）</label>
+      <div class="row">
+        <button id="pair">连接本机 Atlas</button>
+        <span id="pairStatus" class="status"></span>
+      </div>
+      <div class="hint">
+        需要桌面端正在运行。点击后请在 Atlas 窗口上的审批卡片选择「允许」，批准后本扩展免 token
+        直连，重启桌面端也无需重新操作。
+      </div>
+    </div>
+    <div class="field">
+      <label for="token">备选：手动 token</label>
+      <input id="token" placeholder="连接 atlas -serve 或配对不可用时粘贴" />
+      <div class="hint">桌面端：设置 → 浏览器扩展 卡片；或查看 <code>~/.atlas/extension.json</code>。</div>
+    </div>
+    <div class="row">
+      <button id="save">保存并测试</button>
+      <span id="status" class="status"></span>
+    </div>
+    <script src="options.js"></script>
+  </body>
+</html>

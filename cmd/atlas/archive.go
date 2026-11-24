@@ -17,6 +17,7 @@ var archivedCommands = map[string]bool{
 	"/restore": true,
 	"/delete":  true,
 	"/mcp":     true,
+	"/browser": true,
 	// /skill's list half is a read, and the record stays untouched by it. Its
 	// load half is refused by the command itself, which says why: the turn
 	// would append to the file, and that is what this state takes away.
@@ -41,7 +42,7 @@ var archivedCommands = map[string]bool{
 // the one on screen. Same reason as sideHelp: the table above it lists every
 // command atlas has, and leaving the reader to find out by typing which of them
 // still run here would make the one place they look for answers wrong.
-const archivedHelp = "in an archived session only /help, /restore, /delete, /permission, /mcp, /skill, /plugin, /reload and /exit run; /restore puts it back in /resume, /delete removes the file"
+const archivedHelp = "in an archived session only /help, /restore, /delete, /permission, /mcp, /browser, /skill, /plugin, /reload and /exit run; /restore puts it back in /resume, /delete removes the file"
 
 // archivedLocked is what opening an archived session says before the first
 // refusal — the switch into it, or a startup in one. The error would say the

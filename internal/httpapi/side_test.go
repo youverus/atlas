@@ -4,10 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"sync"
 	"testing"
+	"time"
 
 	"pi-go/internal/wire"
 )
@@ -57,6 +59,94 @@ func (h *sideHost) counts() (int, int) {
 
 func idleTurn(context.Context, string, func(wire.AgentEvent) error) (Receipt, error) {
 	return Receipt{}, nil
+}
+
+func TestStopCancelsOnlyTheNamedTurnAndWithdrawsItsApproval(t *testing.T) {
+	var server *Server
+	ask := func(ctx context.Context, session, prompt string, _ func(wire.AgentEvent) error) (Receipt, error) {
+		server.AskContext(ctx, Question{Session: session, Subject: prompt, Tool: "bash"})
+		return Receipt{}, ctx.Err()
+	}
+	server = New(Options{
+		Host:            &sideHost{view: SideView{Open: true}},
+		SessionTurn:     ask,
+		SessionSideTurn: ask,
+	})
+	httpServer := httptest.NewServer(server.Handler())
+	defer httpServer.Close()
+	defer server.Close()
+	sub := server.broker.subscribe()
+	defer server.broker.unsubscribe(sub)
+	deadline := time.NewTimer(4 * time.Second)
+	defer deadline.Stop()
+
+	waitEvent := func(name string, match func([]byte) bool) {
+		t.Helper()
+		for {
+			select {
+			case ev := <-sub.events:
+				if ev.Name == name && match(ev.Data) {
+					return
+				}
+			case <-deadline.C:
+				t.Fatalf("timed out waiting for %s", name)
+			}
+		}
+	}
+	startTurn := func(route, prompt string, side bool) (string, string) {
+		t.Helper()
+		post(t, httpServer, route, fmt.Sprintf(`{"session":"a","prompt":%q}`, prompt), http.StatusAccepted)
+		turn := server.turnStatus("a", side)
+		if !turn.Running || turn.TurnID == "" {
+			t.Fatalf("turn was not registered: %+v", turn)
+		}
+		var question PendingQuestionItem
+		waitEvent("approval", func(data []byte) bool {
+			return json.Unmarshal(data, &question) == nil && question.Subject == prompt
+		})
+		return turn.TurnID, question.ID
+	}
+	stop := func(id string, side bool, status int) {
+		t.Helper()
+		post(t, httpServer, "/api/stop", fmt.Sprintf(`{"session":"a","turnId":%q,"side":%t}`, id, side), status)
+	}
+	waitStopped := func(name, id string) {
+		t.Helper()
+		waitEvent(name, func(data []byte) bool {
+			var done statusEvent
+			if json.Unmarshal(data, &done) != nil || done.TurnID != id || done.Running {
+				return false
+			}
+			if !done.Aborted || done.Error != "" {
+				t.Fatalf("cancelled turn was reported incorrectly: %+v", done)
+			}
+			return true
+		})
+	}
+
+	main, mainApproval := startTurn("/api/ask", "main", false)
+	side, sideApproval := startTurn("/api/side/ask", "side", true)
+	stop(main, true, http.StatusConflict)
+	stop(main, false, http.StatusAccepted)
+	waitStopped("status", main)
+	pending := server.approvals.list()
+	if len(pending) != 1 || pending[0].id != sideApproval || server.turnStatus("a", true).TurnID != side {
+		t.Fatal("stopping the main turn affected the running side turn")
+	}
+	post(t, httpServer, "/api/approval", fmt.Sprintf(`{"id":%q,"allowed":true,"always":true}`, mainApproval), http.StatusConflict)
+
+	next, _ := startTurn("/api/ask", "next", false)
+	stop(main, false, http.StatusConflict)
+	if server.turnStatus("a", false).TurnID != next {
+		t.Fatal("a stale stop request affected the next turn")
+	}
+	stop(next, false, http.StatusAccepted)
+	waitStopped("status", next)
+	stop(side, true, http.StatusAccepted)
+	waitStopped("sidestatus", side)
+	if server.isSessionRunning("a") || server.isSideRunning("a") || len(server.approvals.list()) != 0 {
+		t.Fatal("stopped turns left active execution or approval state")
+	}
 }
 
 // A compaction answers when it is over rather than when it starts: it rewrites
@@ -172,7 +262,7 @@ func TestOpeningTheSideConversationTwiceKeepsIt(t *testing.T) {
 		if response.StatusCode != http.StatusOK {
 			t.Fatalf("open %d = %d, want 200", attempt, response.StatusCode)
 		}
-		var state sideState
+		var state SideView
 		if err := json.NewDecoder(response.Body).Decode(&state); err != nil {
 			t.Fatalf("decode open %d: %v", attempt, err)
 		}
@@ -309,7 +399,7 @@ func TestClosingTheSideConversationDiscardsIt(t *testing.T) {
 		t.Fatalf("get: %v", err)
 	}
 	defer response.Body.Close()
-	var state sideState
+	var state SideView
 	if err := json.NewDecoder(response.Body).Decode(&state); err != nil {
 		t.Fatalf("decode: %v", err)
 	}

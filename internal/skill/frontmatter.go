@@ -8,8 +8,8 @@ import (
 
 // The frontmatter reader is a YAML subset, and it is hand-written because the
 // kernel may not import a parser (tests/deps/run.sh). The subset is what a
-// SKILL.md actually contains: one-line scalars, | and > blocks, comments, and
-// keys nobody reads.
+// SKILL.md actually contains: one-line scalars, | and > blocks with optional
+// trailing-newline indicators, comments, and keys nobody reads.
 //
 // What it does not read, it does not guess at. An anchor, a flow collection or a
 // second document is an error with a line number, because a guessed value would
@@ -78,12 +78,13 @@ func parseFrontmatter(text string) (map[string]string, error) {
 			i = skipBlock(body, i+1) - 1
 			continue
 		}
-		switch {
-		case rest == "|" || rest == ">":
+		switch header := strings.TrimSpace(stripComment(rest)); header {
+		case "|", "|-", "|+", ">", ">-", ">+":
 			block, next := blockScalar(body, i+1)
 			i = next - 1
-			values[key] = fold(block, rest == ">")
-		case rest == "":
+			// Skill metadata is consumed without trailing whitespace.
+			values[key] = fold(block, header[0] == '>')
+		case "":
 			return nil, subsetError(number, fmt.Sprintf("%s: has no value on its line", key))
 		default:
 			if err := rejectSyntax(rest); err != nil {
@@ -242,5 +243,5 @@ func stripComment(value string) string {
 // would send someone who wrote valid YAML looking for a specification this
 // reader does not implement, so the message says what to write instead.
 func subsetError(line int, what string) error {
-	return fmt.Errorf("frontmatter line %d: %s; this reader reads one-line values, | and > blocks, and # comments", line, what)
+	return fmt.Errorf("frontmatter line %d: %s; this reader reads one-line values, | and > blocks with optional + or -, and # comments", line, what)
 }

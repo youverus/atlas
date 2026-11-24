@@ -18,6 +18,8 @@ package transcript
 import (
 	"strings"
 	"time"
+
+	"pi-go/internal/wire"
 )
 
 // Role is what a block is for. It decides the marker, the indent, and the
@@ -70,6 +72,8 @@ type Block struct {
 	Name string
 	// Text is the body. It is appended to while the block is open.
 	Text string
+	// ErrorCode identifies a model failure on a replayed error block.
+	ErrorCode string
 	// Progress is what a running call last reported. It replaces itself in
 	// place rather than accumulating: a call that reports a hundred times is
 	// still one line, because the line is not the report, it is the sign that
@@ -91,7 +95,15 @@ type Block struct {
 	// costs the terminal nothing.
 	Result string
 	// ID is the tool call this block belongs to.
-	ID string
+	ID       string
+	Subagent *wire.SubagentUpdate
+	Artifact *wire.ArtifactRef
+	// Timestamp is when the block completed, in Unix milliseconds.
+	Timestamp int64
+	// DurationMs is how long the turn or message took in milliseconds.
+	DurationMs int64
+	// TokensPerSec is the output generation speed in tokens/sec.
+	TokensPerSec float64
 	// Open marks a block that is still being written.
 	Open bool
 	// since is when an open block started, for the duration in its Note.

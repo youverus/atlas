@@ -32,7 +32,8 @@ var sideCommands = map[string]bool{
 	"/parent": true,
 	// /mcp only describes the session: it reads the connections the side
 	// conversation already borrowed and changes neither.
-	"/mcp": true,
+	"/mcp":     true,
+	"/browser": true,
 	// /skill reads a file and asks in the conversation the prompt belongs to.
 	// It changes nothing about the session the snapshot came from, so the
 	// request lands in the side conversation exactly as a typed one would.
@@ -198,7 +199,7 @@ func enter(out io.Writer, name, note string) {
 // openSide switches the prompt into the side conversation, taking a snapshot of
 // the main one when there is none to return to, and asks the question when one
 // was typed on the same line.
-func openSide(ctx context.Context, application *app.App, state *sideState, question string, out io.Writer, render *renderer) error {
+func openSide(ctx context.Context, application *app.App, state *sideState, question string, out io.Writer, render *renderer, images ...string) error {
 	side := state.conversation()
 	if side == nil || side.Closed() {
 		opened, err := application.BeginSide()
@@ -230,7 +231,11 @@ func openSide(ctx context.Context, application *app.App, state *sideState, quest
 	if strings.TrimSpace(question) == "" {
 		return nil
 	}
-	return askSideLine(ctx, side, question, render)
+	message, err := interactiveMessage(question, images)
+	if err != nil {
+		return err
+	}
+	return askSide(ctx, side, message, render)
 }
 
 // sideKeys names the two ways out of the side view. It goes on every notice
@@ -298,15 +303,4 @@ func askSide(ctx context.Context, side *app.Side, message wire.Message, render *
 	return runTurn(ctx, render, func(turnCtx context.Context, emit func(wire.AgentEvent) error) (app.Result, error) {
 		return side.Ask(turnCtx, message, emit)
 	})
-}
-
-// askSideLine is the side conversation's askLine: a question the reader typed, so
-// an "@path" in it becomes content. It resolves against the side conversation's
-// own directory, which is the one its tools point at.
-func askSideLine(ctx context.Context, side *app.Side, line string, render *renderer) error {
-	message, err := attachMessage(line, side.Session().Cwd())
-	if err != nil {
-		return err
-	}
-	return askSide(ctx, side, message, render)
 }

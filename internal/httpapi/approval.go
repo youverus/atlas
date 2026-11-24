@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -20,6 +21,8 @@ const approvalTimeout = 10 * time.Minute
 // nothing else, so the shell adapts its Ask to this — the same inversion Turn
 // already uses for the provider side.
 type Question struct {
+	// Session identifies the owning conversation in multi-session builds.
+	Session string `json:"session,omitempty"`
 	// Subject is the sentence the reader decides on.
 	Subject string `json:"subject"`
 	// Tool is what an "always" answer is remembered against.
@@ -36,6 +39,7 @@ type Decision struct {
 // pending is one open question: what to draw, and where the answer goes.
 type pending struct {
 	Question
+	ctx    context.Context
 	id     string
 	answer chan Decision
 }
@@ -65,15 +69,16 @@ func newApprovals() *approvals {
 
 // add registers a question and returns it. A closed server refuses: the
 // caller then denies, because a window that is gone cannot approve anything.
-func (a *approvals) add(question Question) (*pending, bool) {
+func (a *approvals) add(ctx context.Context, question Question) (*pending, bool) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if a.closed {
+	if a.closed || ctx.Err() != nil {
 		return nil, false
 	}
 	a.next++
 	item := &pending{
 		Question: question,
+		ctx:      ctx,
 		id:       fmt.Sprintf("a%d", a.next),
 		answer:   make(chan Decision, 1),
 	}
@@ -89,7 +94,7 @@ func (a *approvals) add(question Question) (*pending, bool) {
 func (a *approvals) settle(id string, decision Decision) bool {
 	a.mu.Lock()
 	item, ok := a.open[id]
-	if !ok {
+	if !ok || item.ctx.Err() != nil {
 		a.mu.Unlock()
 		return false
 	}
@@ -175,11 +180,20 @@ func (a *approvals) close() {
 // timeout all mean the same thing, and guessing yes is the answer that loses
 // data.
 func (s *Server) Ask(question Question) Decision {
-	item, ok := s.approvals.add(question)
+	return s.AskContext(context.Background(), question)
+}
+
+// AskContext withdraws a pending question when its turn is cancelled.
+func (s *Server) AskContext(ctx context.Context, question Question) Decision {
+	item, ok := s.approvals.add(ctx, question)
 	if !ok {
 		return Decision{}
 	}
-	defer s.approvals.forget(item.id)
+	defer func() {
+		s.approvals.forget(item.id)
+		payload, _ := json.Marshal(map[string]string{"id": item.id})
+		s.broker.publish(streamEvent{Name: "approval_resolved", Data: payload})
+	}()
 
 	if payload, err := json.Marshal(struct {
 		ID string `json:"id"`
@@ -193,7 +207,12 @@ func (s *Server) Ask(question Question) Decision {
 
 	select {
 	case decision := <-item.answer:
+		if ctx.Err() != nil {
+			return Decision{}
+		}
 		return decision
+	case <-ctx.Done():
+		return Decision{}
 	case <-timer.C:
 		return Decision{}
 	}
@@ -223,6 +242,17 @@ func (s *Server) serveApproval(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	decision := Decision{Allowed: request.Allowed, Always: request.Always}
+	if s.remoteRouter != nil {
+		handled, err := s.remoteRouter.ForwardApproval(r.Context(), request.ID, request.Allowed, request.Always)
+		if handled {
+			if err != nil {
+				fail(w, err, http.StatusConflict)
+				return
+			}
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+	}
 	if !s.approvals.settle(request.ID, decision) {
 		http.Error(w, "httpapi: no such approval (already answered or withdrawn)", http.StatusConflict)
 		return

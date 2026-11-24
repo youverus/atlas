@@ -1,11 +1,13 @@
 package httpapi
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"pi-go/internal/wire"
 )
@@ -32,14 +34,13 @@ type Host interface {
 	// NewSession abandons the current conversation and starts an empty one.
 	NewSession() error
 	// ForkPoints lists where the conversation in view can be branched: the end
-	// of it first, then every user message in the order it was said.
+	// of it first, then every answer in the order it was said.
 	ForkPoints() []ForkPoint
-	// ForkSession branches the conversation before entryID, or at the end of it
-	// when entryID is empty, leaving the current one on disk untouched. The name
-	// is applied to the new session; empty keeps whatever the copy inherited.
-	// It returns the text of the message that was branched off — the caller
-	// offers it back so the reader can say it differently.
-	ForkSession(entryID, name string) (string, error)
+	// ForkSession branches the conversation after entryID, keeping that answer,
+	// or at the end of it when entryID is empty, leaving the current one on disk
+	// untouched. The name is applied to the new session; empty keeps whatever
+	// the copy inherited.
+	ForkSession(entryID, name string) error
 	// ArchiveSession hides a conversation from the picker without deleting it.
 	ArchiveSession(path string) error
 	// RestoreSession undoes ArchiveSession.
@@ -111,14 +112,256 @@ type Picker interface {
 	PickFolder() (string, error)
 }
 
+// NamedProjectHost is an optional extension to Host that stores a custom
+// display name alongside the project directory. Keeping it separate from Host
+// lets partial Host stubs in transport tests keep compiling untouched.
+type NamedProjectHost interface {
+	AddNamedProject(path, name string) error
+}
+
+// RemoteProjectHost is an optional extension to Host for managing projects
+// and sessions anchored on remote SSH compute devices.
+type RemoteProjectHost interface {
+	AddRemoteProject(deviceID, path, name string) error
+	RemoveRemoteProject(deviceID, path string) error
+	NewRemoteSessionIn(deviceID, cwd string) error
+}
+
+// BrowseDirEntry describes one subdirectory returned by ProjectBrowser.
+type BrowseDirEntry struct {
+	Name string `json:"name"`
+	Path string `json:"path"`
+}
+
+// DirBrowseResult lists subdirectories inside a local or remote directory.
+type DirBrowseResult struct {
+	DeviceID string           `json:"deviceId,omitempty"`
+	Path     string           `json:"path"`
+	Parent   string           `json:"parent,omitempty"`
+	Home     string           `json:"home,omitempty"`
+	Entries  []BrowseDirEntry `json:"entries"`
+}
+
+// ProjectBrowser is an optional extension to Host for browsing directories
+// when adding a project without relying on the local OS file picker.
+type ProjectBrowser interface {
+	BrowseDirs(deviceID, path string, includeHidden bool) (DirBrowseResult, error)
+}
+
+// DiscoveredProject describes an existing project directory or workspace with
+// historical sessions on a target machine.
+type DiscoveredProject struct {
+	DeviceID     string `json:"deviceId,omitempty"`
+	Path         string `json:"path"`
+	Name         string `json:"name"`
+	SessionCount int    `json:"sessionCount,omitempty"`
+	LastModified string `json:"lastModified,omitempty"`
+	Added        bool   `json:"added,omitempty"`
+}
+
+// DiscoverProjectsResult is returned by GET /api/projects/discover.
+type DiscoverProjectsResult struct {
+	DeviceID string              `json:"deviceId,omitempty"`
+	Projects []DiscoveredProject `json:"projects"`
+}
+
+// ProjectDiscoverer is an optional extension to Host for discovering existing
+// projects and session workspaces on a local or connected remote machine.
+type ProjectDiscoverer interface {
+	DiscoverProjects(deviceID string) ([]DiscoveredProject, error)
+}
+
+// SessionStatus reports live properties of the conversation in view beyond the
+// static startup Facts. It is separate from Host for the same reason Picker is:
+// partial Host stubs in transport tests embed Host without implementing every
+// optional method, and /api/state must not fail or panic against them.
+type SessionStatus interface {
+	SessionArchived() bool
+	SessionDirectory() string
+}
+
+// LiveModelStatus is an optional extension of Host for reporting the current
+// "provider/model" name in /api/state and hello frames after runtime switches or
+// config reloads.
+type LiveModelStatus interface {
+	SessionModel() string
+}
+
+// ConfigReloader is an optional extension of Host for reloading configuration
+// from disk while the server is running. Builds without one answer 501.
+type ConfigReloader interface {
+	ReloadConfig() error
+}
+
+// SessionTracker is an optional extension of Host that identifies the session
+// currently viewed in the window for multi-session event routing.
+type SessionTracker interface {
+	CurrentSession() string
+}
+
+// MCPStatus is an optional extension of Host for inspecting configured MCP
+// servers and refreshing their tool listings without interrupting active turns.
+type MCPStatus interface {
+	MCP() (MCPState, error)
+	RefreshMCP(name string) (MCPState, error)
+}
+
+// SkillStatus is an optional extension of Host for inspecting installed skills
+// and reading or preparing a skill prompt without interrupting active turns.
+type SkillStatus interface {
+	Skills() (SkillState, error)
+	SkillContent(name string) (SkillDetail, error)
+	LoadSkillPrompt(name, args string) (string, error)
+}
+
+// MCPSettings allows a host to change the enabled state of an MCP server.
+type MCPSettings interface {
+	SetMCPEnabled(ctx context.Context, name string, enabled bool) (MCPState, error)
+}
+
+// SkillSettings allows a host to change the enabled state of a skill.
+type SkillSettings interface {
+	SetSkillEnabled(ctx context.Context, name string, enabled bool) (SkillState, error)
+}
+
+// PluginStatus is an optional extension of Host for inspecting installed
+// plugins and their contributed skills and MCP servers.
+type PluginStatus interface {
+	Plugins() (PluginState, error)
+}
+
+// PluginInfo describes one installed plugin and what it contributes.
+type PluginInfo struct {
+	Name        string   `json:"name"`
+	Description string   `json:"description,omitempty"`
+	Dir         string   `json:"dir"`
+	SkillsDir   string   `json:"skillsDir,omitempty"`
+	SkillNames  []string `json:"skillNames"`
+	Servers     []string `json:"servers"`
+}
+
+// PluginState lists installed plugins and any manifest/scan warnings.
+type PluginState struct {
+	Dir     string       `json:"dir,omitempty"`
+	Plugins []PluginInfo `json:"plugins"`
+	Notes   []string     `json:"notes,omitempty"`
+}
+
+// BrowserStatus is an optional extension of Host for managing the controlled
+// Chromium browser tabs and captures from the GUI without disturbing active turns.
+type BrowserStatus interface {
+	BrowserState() (BrowserState, error)
+	BrowserOpen(url string) (BrowserTabInfo, error)
+	BrowserNavigate(tabID, url string) (BrowserTabInfo, error)
+	BrowserAction(tabID, action string) error
+	BrowserScreenshot(tabID string) (BrowserCapture, error)
+}
+
+// BrowserTabInfo describes one managed Chromium browser tab.
+type BrowserTabInfo struct {
+	ID           string `json:"id"`
+	TargetID     string `json:"targetId"`
+	URL          string `json:"url"`
+	Title        string `json:"title"`
+	Generation   int    `json:"generation"`
+	Loading      bool   `json:"loading"`
+	CanGoBack    bool   `json:"canGoBack"`
+	CanGoForward bool   `json:"canGoForward"`
+	Control      string `json:"control"`
+	Paused       bool   `json:"paused,omitempty"`
+	Active       bool   `json:"active"`
+	CreatedAt    int64  `json:"createdAt"`
+}
+
+// BrowserState describes the controlled Chromium availability, status, and tabs.
+type BrowserState struct {
+	Available  bool             `json:"available"`
+	Executable string           `json:"executable,omitempty"`
+	ProfileDir string           `json:"profileDir,omitempty"`
+	Running    bool             `json:"running"`
+	ActiveTab  string           `json:"activeTab,omitempty"`
+	Tabs       []BrowserTabInfo `json:"tabs"`
+}
+
+// BrowserCapture carries one viewport screenshot of a browser tab.
+type BrowserCapture struct {
+	TabID  string `json:"tabId"`
+	MIME   string `json:"mime"`
+	Base64 string `json:"base64"`
+	Width  int    `json:"width"`
+	Height int    `json:"height"`
+}
+
+// SkillRootInfo describes one skill root directory scanned for the session.
+type SkillRootInfo struct {
+	Scope string `json:"scope"`
+	Dir   string `json:"dir"`
+}
+
+// SkillInfo describes one discovered skill available to the session.
+type SkillInfo struct {
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+	Path        string `json:"path"`
+	Scope       string `json:"scope"`
+	Disabled    bool   `json:"disabled,omitempty"`
+}
+
+// SkillState is the full skill catalog snapshot for the control panel.
+type SkillState struct {
+	Cwd       string          `json:"cwd,omitempty"`
+	Roots     []SkillRootInfo `json:"roots"`
+	Skills    []SkillInfo     `json:"skills"`
+	Notes     []string        `json:"notes,omitempty"`
+	CanToggle bool            `json:"canToggle,omitempty"`
+}
+
+// SkillDetail carries one skill's metadata along with its SKILL.md content.
+type SkillDetail struct {
+	SkillInfo
+	Body string `json:"body"`
+}
+
+// MCPToolInfo describes one remote MCP tool exposed to the session.
+type MCPToolInfo struct {
+	Name        string `json:"name"`
+	Title       string `json:"title,omitempty"`
+	WireName    string `json:"wireName"`
+	Description string `json:"description,omitempty"`
+}
+
+// MCPServerInfo describes one configured MCP server and its connection state.
+type MCPServerInfo struct {
+	Name         string        `json:"name"`
+	Version      string        `json:"version,omitempty"`
+	Transport    string        `json:"transport,omitempty"`
+	State        string        `json:"state"`
+	Declared     int           `json:"declared"`
+	Tools        []MCPToolInfo `json:"tools"`
+	Missing      []string      `json:"missing,omitempty"`
+	Error        string        `json:"error,omitempty"`
+	RefreshError string        `json:"refreshError,omitempty"`
+}
+
+// MCPState is the full MCP server snapshot for the control panel.
+type MCPState struct {
+	ConfigPath string          `json:"configPath,omitempty"`
+	Servers    []MCPServerInfo `json:"servers"`
+	CanToggle  bool            `json:"canToggle,omitempty"`
+}
+
 // ProjectGroup is one folder in the rail: a project and its conversations.
 //
 // Default marks the folder a conversation starts in when the reader has not
 // picked another one. It is always drawn — a rail whose only group vanished
 // with the last project would leave the reader no way to start anything.
 type ProjectGroup struct {
-	Path string `json:"path"`
-	Name string `json:"name"`
+	Path        string `json:"path"`
+	Name        string `json:"name"`
+	DeviceID    string `json:"deviceId,omitempty"`
+	DeviceName  string `json:"deviceName,omitempty"`
+	DeviceState string `json:"deviceState,omitempty"`
+	RemoteError string `json:"remoteError,omitempty"`
 	// Default is the folder conversations start in when nothing else is chosen.
 	Default bool `json:"default,omitempty"`
 	// Missing marks a folder that was removed from under the list. Its
@@ -140,6 +383,7 @@ type SessionInfo struct {
 	ID           string `json:"id"`
 	Name         string `json:"name,omitempty"`
 	Cwd          string `json:"cwd,omitempty"`
+	DeviceID     string `json:"deviceId,omitempty"`
 	Created      string `json:"created,omitempty"`
 	Modified     string `json:"modified,omitempty"`
 	Messages     int    `json:"messages"`
@@ -156,14 +400,20 @@ type SessionInfo struct {
 // and a bad contract, because inserting a role in the middle of the enum would
 // silently rename every one after it.
 type TranscriptBlock struct {
-	Role   string `json:"role"`
-	Name   string `json:"name,omitempty"`
-	Text   string `json:"text,omitempty"`
-	Note   string `json:"note,omitempty"`
-	Detail string `json:"detail,omitempty"`
-	Args   string `json:"args,omitempty"`
-	Result string `json:"result,omitempty"`
-	ID     string `json:"id,omitempty"`
+	Role         string               `json:"role"`
+	Name         string               `json:"name,omitempty"`
+	Text         string               `json:"text,omitempty"`
+	Note         string               `json:"note,omitempty"`
+	Detail       string               `json:"detail,omitempty"`
+	Args         string               `json:"args,omitempty"`
+	Result       string               `json:"result,omitempty"`
+	ID           string               `json:"id,omitempty"`
+	Timestamp    int64                `json:"timestamp,omitempty"`
+	DurationMs   int64                `json:"durationMs,omitempty"`
+	TokensPerSec float64              `json:"tokensPerSec,omitempty"`
+	Subagent     *wire.SubagentUpdate `json:"subagent,omitempty"`
+	Artifact     *wire.ArtifactRef    `json:"artifact,omitempty"`
+	ErrorCode    string               `json:"errorCode,omitempty"`
 }
 
 // TrajectoryRow is one recorded fact of the conversation in view: a prompt, an
@@ -222,21 +472,29 @@ type SideView struct {
 	Open      bool              `json:"open"`
 	Inherited int               `json:"inherited"`
 	Blocks    []TranscriptBlock `json:"blocks"`
+	Running   bool              `json:"running"`
+	TurnID    string            `json:"turnId,omitempty"`
 }
 
-// ForkPoint is one place the conversation can be branched before.
+// ForkPoint is one place the conversation can be branched from: after an
+// answer.
 //
 // Index is the number the reader picks it by, and 0 is the end of the
 // conversation: that point has no entry to name, which is why EntryID is empty
 // there rather than absent — "the whole conversation" is a row like any other,
 // and the page draws it from the same list.
 //
-// Text is the message in full, not a preview. The window already holds the
-// whole transcript, so a cut here would save nothing and would put a second
+// Turn is the prompt the answer closed, counted from 1. The window groups its
+// transcript by prompt, so this is how a fork button drawn under a reply finds
+// the entry behind it: the transcript carries no entry ids of its own.
+//
+// Text is the answer in full, not a preview. The window already holds the whole
+// transcript, so a cut here would save nothing and would put a second
 // truncation rule next to the one the terminal uses.
 type ForkPoint struct {
 	EntryID string `json:"entryId,omitempty"`
 	Index   int    `json:"index"`
+	Turn    int    `json:"turn,omitempty"`
 	Text    string `json:"text,omitempty"`
 }
 
@@ -254,9 +512,11 @@ type ModelOption struct {
 
 // ModelList is the whole model surface in one answer: there is no second call
 // to make, because a picker with a model list and no current model is a picker
-// that cannot draw its own selection.
+// that cannot draw its own selection. Pending names a reloaded default model
+// queued until the running turn finishes and the next user message starts.
 type ModelList struct {
 	Current  string        `json:"current"`
+	Pending  string        `json:"pending,omitempty"`
 	Thinking string        `json:"thinking,omitempty"`
 	Levels   []string      `json:"levels,omitempty"`
 	Models   []ModelOption `json:"models"`
@@ -284,18 +544,29 @@ type PermissionState struct {
 // context fields are separate: a session with no recorded usage still has a
 // window.
 type Stats struct {
-	SessionID         string  `json:"sessionId,omitempty"`
-	SessionFile       string  `json:"sessionFile,omitempty"`
-	UserMessages      int     `json:"userMessages"`
-	AssistantMessages int     `json:"assistantMessages"`
-	ToolCalls         int     `json:"toolCalls"`
-	TotalMessages     int     `json:"totalMessages"`
-	InputTokens       int64   `json:"inputTokens"`
-	OutputTokens      int64   `json:"outputTokens"`
-	TotalTokens       int64   `json:"totalTokens"`
-	Cost              float64 `json:"cost"`
-	ContextTokens     int     `json:"contextTokens"`
-	ContextWindow     int     `json:"contextWindow"`
+	SessionID          string   `json:"sessionId,omitempty"`
+	SessionFile        string   `json:"sessionFile,omitempty"`
+	UserMessages       int      `json:"userMessages"`
+	AssistantMessages  int      `json:"assistantMessages"`
+	ToolCalls          int      `json:"toolCalls"`
+	TotalMessages      int      `json:"totalMessages"`
+	InputTokens        int64    `json:"inputTokens"`
+	OutputTokens       int64    `json:"outputTokens"`
+	TotalTokens        int64    `json:"totalTokens"`
+	Cost               float64  `json:"cost"`
+	ContextTokens      int      `json:"contextTokens"`
+	ContextWindow      int      `json:"contextWindow"`
+	MCPServers         int      `json:"mcpServers"`
+	MCPConfigured      int      `json:"mcpConfigured"`
+	MCPTools           int      `json:"mcpTools"`
+	MCPTokens          int      `json:"mcpTokens"`
+	Skills             int      `json:"skills"`
+	SkillsTokens       int      `json:"skillsTokens"`
+	AgentsMDLoaded     bool     `json:"agentsMdLoaded"`
+	ContextFiles       []string `json:"contextFiles,omitempty"`
+	ContextFilesTokens int      `json:"contextFilesTokens"`
+	SystemPrompt       string   `json:"systemPrompt,omitempty"`
+	SystemPromptTokens int      `json:"systemPromptTokens"`
 }
 
 // FileEntry is one row of a directory listing. Path is relative to the working
@@ -309,6 +580,7 @@ type FileEntry struct {
 
 // DirListing is one directory.
 type DirListing struct {
+	Root    string      `json:"root,omitempty"`
 	Path    string      `json:"path"`
 	Entries []FileEntry `json:"entries"`
 }
@@ -342,11 +614,29 @@ func (s *Server) mountHost() {
 	s.mux.HandleFunc("POST /api/projects", s.serveProjectAdd)
 	s.mux.HandleFunc("POST /api/projects/remove", s.serveProjectRemove)
 	s.mux.HandleFunc("POST /api/projects/pick", s.serveProjectPick)
+	s.mux.HandleFunc("GET /api/projects/browse", s.serveProjectBrowse)
+	s.mux.HandleFunc("GET /api/projects/discover", s.serveProjectDiscover)
 	s.mux.HandleFunc("GET /api/models", s.serveModels)
 	s.mux.HandleFunc("POST /api/models", s.serveModelSet)
 	s.mux.HandleFunc("POST /api/thinking", s.serveThinkingSet)
 	s.mux.HandleFunc("GET /api/permission", s.servePermission)
 	s.mux.HandleFunc("POST /api/permission", s.servePermissionSet)
+	s.mux.HandleFunc("POST /api/config/reload", s.serveConfigReload)
+	s.mux.HandleFunc("GET /api/config/models", s.serveModelConfig)
+	s.mux.HandleFunc("POST /api/config/models", s.serveModelConfigSave)
+	s.mux.HandleFunc("GET /api/mcp", s.serveMCP)
+	s.mux.HandleFunc("POST /api/mcp/refresh", s.serveMCPRefresh)
+	s.mux.HandleFunc("POST /api/mcp/enabled", s.serveMCPEnabled)
+	s.mux.HandleFunc("GET /api/skills", s.serveSkills)
+	s.mux.HandleFunc("GET /api/skills/content", s.serveSkillContent)
+	s.mux.HandleFunc("POST /api/skills/load", s.serveSkillLoad)
+	s.mux.HandleFunc("POST /api/skills/enabled", s.serveSkillEnabled)
+	s.mux.HandleFunc("GET /api/plugins", s.servePlugins)
+	s.mux.HandleFunc("GET /api/browser", s.serveBrowser)
+	s.mux.HandleFunc("POST /api/browser/open", s.serveBrowserOpen)
+	s.mux.HandleFunc("POST /api/browser/navigate", s.serveBrowserNavigate)
+	s.mux.HandleFunc("POST /api/browser/action", s.serveBrowserAction)
+	s.mux.HandleFunc("GET /api/browser/screenshot", s.serveBrowserScreenshot)
 	s.mux.HandleFunc("GET /api/stats", s.serveStats)
 	s.mux.HandleFunc("GET /api/files", s.serveFiles)
 	s.mux.HandleFunc("GET /api/file", s.serveFile)
@@ -419,8 +709,9 @@ func (s *Server) serveSessionOpen(w http.ResponseWriter, r *http.Request) {
 		fail(w, err, http.StatusConflict)
 		return
 	}
-	s.publishStatus(statusEvent{Running: s.running.Load()})
+	s.publishStatus(s.currentStatusEvent())
 	writeJSON(w, map[string]bool{"ok": true})
+	s.WakeSubagents(s.currentSessionKey())
 }
 
 // serveSessionTranscript replays the conversation in view.
@@ -471,7 +762,8 @@ func (s *Server) serveSessionTrajectory(w http.ResponseWriter, r *http.Request) 
 // primary button starts a conversation where the last one ran, and a project's
 // own button names the folder it belongs to.
 type newSessionRequest struct {
-	Cwd string `json:"cwd"`
+	Cwd      string `json:"cwd"`
+	DeviceID string `json:"deviceId,omitempty"`
 }
 
 func (s *Server) serveSessionNew(w http.ResponseWriter, r *http.Request) {
@@ -486,7 +778,15 @@ func (s *Server) serveSessionNew(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var err error
-	if request.Cwd == "" {
+	deviceID := strings.TrimSpace(request.DeviceID)
+	if deviceID != "" && deviceID != "local" {
+		remote, ok := s.host.(RemoteProjectHost)
+		if !ok {
+			http.Error(w, "httpapi: remote projects are not configured", http.StatusNotImplemented)
+			return
+		}
+		err = remote.NewRemoteSessionIn(deviceID, request.Cwd)
+	} else if request.Cwd == "" {
 		err = s.host.NewSession()
 	} else {
 		err = s.host.NewSessionIn(request.Cwd)
@@ -495,7 +795,7 @@ func (s *Server) serveSessionNew(w http.ResponseWriter, r *http.Request) {
 		fail(w, err, http.StatusConflict)
 		return
 	}
-	s.publishStatus(statusEvent{Running: s.running.Load()})
+	s.publishStatus(s.currentStatusEvent())
 	writeJSON(w, map[string]bool{"ok": true})
 }
 
@@ -508,12 +808,11 @@ type forkSessionRequest struct {
 	Name    string `json:"name"`
 }
 
-// forkSessionResponse carries the message that was branched off, so the page can
-// put it back in the input box. It is empty for a fork at the end: nothing was
-// left behind to say differently.
+// forkSessionResponse says the fork happened. Nothing comes back with it: a
+// branch taken after a reply keeps that reply, so there is no message left
+// behind to put in the input box.
 type forkSessionResponse struct {
-	OK   bool   `json:"ok"`
-	Text string `json:"text,omitempty"`
+	OK bool `json:"ok"`
 }
 
 // serveSessionForkPoints answers where the conversation in view can be branched.
@@ -546,13 +845,12 @@ func (s *Server) serveSessionFork(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "httpapi: bad request body: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	text, err := s.host.ForkSession(request.EntryID, request.Name)
-	if err != nil {
+	if err := s.host.ForkSession(request.EntryID, request.Name); err != nil {
 		fail(w, err, http.StatusConflict)
 		return
 	}
-	s.publishStatus(statusEvent{Running: s.running.Load()})
-	writeJSON(w, forkSessionResponse{OK: true, Text: text})
+	s.publishStatus(s.currentStatusEvent())
+	writeJSON(w, forkSessionResponse{OK: true})
 }
 
 // serveProjects draws the rail: every folder with its conversations.
@@ -572,34 +870,128 @@ func (s *Server) serveProjects(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, list)
 }
 
+type projectAddRequest struct {
+	Path     string `json:"path"`
+	Name     string `json:"name,omitempty"`
+	DeviceID string `json:"deviceId,omitempty"`
+}
+
 func (s *Server) serveProjectAdd(w http.ResponseWriter, r *http.Request) {
 	if !s.needHost(w) {
 		return
 	}
-	request, ok := s.decodeSession(w, r)
-	if !ok {
+	var request projectAddRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&request); err != nil {
+		http.Error(w, "httpapi: bad request body: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	if err := s.host.AddProject(request.Path); err != nil {
+	if strings.TrimSpace(request.Path) == "" {
+		http.Error(w, "httpapi: empty path", http.StatusBadRequest)
+		return
+	}
+	var err error
+	deviceID := strings.TrimSpace(request.DeviceID)
+	if deviceID != "" && deviceID != "local" {
+		remote, ok := s.host.(RemoteProjectHost)
+		if !ok {
+			http.Error(w, "httpapi: remote projects are not configured", http.StatusNotImplemented)
+			return
+		}
+		err = remote.AddRemoteProject(deviceID, request.Path, request.Name)
+	} else if named, ok := s.host.(NamedProjectHost); ok {
+		err = named.AddNamedProject(request.Path, request.Name)
+	} else {
+		err = s.host.AddProject(request.Path)
+	}
+	if err != nil {
 		fail(w, err, http.StatusBadRequest)
 		return
 	}
 	writeJSON(w, map[string]bool{"ok": true})
 }
 
+type projectRemoveRequest struct {
+	Path     string `json:"path"`
+	DeviceID string `json:"deviceId,omitempty"`
+}
+
 func (s *Server) serveProjectRemove(w http.ResponseWriter, r *http.Request) {
 	if !s.needHost(w) {
 		return
 	}
-	request, ok := s.decodeSession(w, r)
-	if !ok {
+	var request projectRemoveRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&request); err != nil {
+		http.Error(w, "httpapi: bad request body: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	if err := s.host.RemoveProject(request.Path); err != nil {
+	if strings.TrimSpace(request.Path) == "" {
+		http.Error(w, "httpapi: empty path", http.StatusBadRequest)
+		return
+	}
+	var err error
+	deviceID := strings.TrimSpace(request.DeviceID)
+	if deviceID != "" && deviceID != "local" {
+		remote, ok := s.host.(RemoteProjectHost)
+		if !ok {
+			http.Error(w, "httpapi: remote projects are not configured", http.StatusNotImplemented)
+			return
+		}
+		err = remote.RemoveRemoteProject(deviceID, request.Path)
+	} else {
+		err = s.host.RemoveProject(request.Path)
+	}
+	if err != nil {
 		fail(w, err, http.StatusBadRequest)
 		return
 	}
 	writeJSON(w, map[string]bool{"ok": true})
+}
+
+func (s *Server) serveProjectBrowse(w http.ResponseWriter, r *http.Request) {
+	if !s.needHost(w) {
+		return
+	}
+	browser, ok := s.host.(ProjectBrowser)
+	if !ok {
+		http.Error(w, "httpapi: project directory browsing is not configured", http.StatusNotImplemented)
+		return
+	}
+	deviceID := strings.TrimSpace(r.URL.Query().Get("device"))
+	path := r.URL.Query().Get("path")
+	includeHidden, _ := strconv.ParseBool(r.URL.Query().Get("hidden"))
+	res, err := browser.BrowseDirs(deviceID, path, includeHidden)
+	if err != nil {
+		fail(w, err, http.StatusBadRequest)
+		return
+	}
+	if res.Entries == nil {
+		res.Entries = []BrowseDirEntry{}
+	}
+	writeJSON(w, res)
+}
+
+func (s *Server) serveProjectDiscover(w http.ResponseWriter, r *http.Request) {
+	if !s.needHost(w) {
+		return
+	}
+	discoverer, ok := s.host.(ProjectDiscoverer)
+	if !ok {
+		http.Error(w, "httpapi: project discovery is not configured", http.StatusNotImplemented)
+		return
+	}
+	deviceID := strings.TrimSpace(r.URL.Query().Get("device"))
+	list, err := discoverer.DiscoverProjects(deviceID)
+	if err != nil {
+		fail(w, err, http.StatusBadRequest)
+		return
+	}
+	if list == nil {
+		list = []DiscoveredProject{}
+	}
+	writeJSON(w, DiscoverProjectsResult{
+		DeviceID: deviceID,
+		Projects: list,
+	})
 }
 
 // serveProjectPick opens the shell's own folder chooser. A build without one
@@ -646,6 +1038,9 @@ func (s *Server) serveSessionRestore(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, map[string]bool{"ok": true})
+	if session := s.currentSessionKey(); session == request.Path {
+		s.WakeSubagents(session)
+	}
 }
 
 func (s *Server) serveSessionDelete(w http.ResponseWriter, r *http.Request) {
@@ -773,6 +1168,350 @@ func (s *Server) servePermissionSet(w http.ResponseWriter, r *http.Request) {
 		state.Modes = []PermissionMode{}
 	}
 	writeJSON(w, state)
+}
+
+func (s *Server) serveConfigReload(w http.ResponseWriter, r *http.Request) {
+	if !s.needHost(w) {
+		return
+	}
+	reloader, ok := s.host.(ConfigReloader)
+	if !ok {
+		http.Error(w, "httpapi: this build cannot reload configuration", http.StatusNotImplemented)
+		return
+	}
+	if err := reloader.ReloadConfig(); err != nil {
+		fail(w, err, http.StatusConflict)
+		return
+	}
+	writeJSON(w, map[string]bool{"ok": true})
+}
+
+func (s *Server) serveMCP(w http.ResponseWriter, r *http.Request) {
+	if !s.needHost(w) {
+		return
+	}
+	provider, ok := s.host.(MCPStatus)
+	if !ok {
+		http.Error(w, "httpapi: this build does not expose MCP status", http.StatusNotImplemented)
+		return
+	}
+	state, err := provider.MCP()
+	if err != nil {
+		fail(w, err, http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, normalizeMCPState(state))
+}
+
+func (s *Server) serveMCPRefresh(w http.ResponseWriter, r *http.Request) {
+	if !s.needHost(w) {
+		return
+	}
+	provider, ok := s.host.(MCPStatus)
+	if !ok {
+		http.Error(w, "httpapi: this build does not expose MCP status", http.StatusNotImplemented)
+		return
+	}
+	var request struct {
+		Name string `json:"name"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&request); err != nil && !errors.Is(err, io.EOF) {
+		http.Error(w, "httpapi: bad request body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	state, err := provider.RefreshMCP(request.Name)
+	if err != nil {
+		fail(w, err, http.StatusConflict)
+		return
+	}
+	writeJSON(w, normalizeMCPState(state))
+}
+
+func (s *Server) serveMCPEnabled(w http.ResponseWriter, r *http.Request) {
+	if !s.needHost(w) {
+		return
+	}
+	settings, ok := s.host.(MCPSettings)
+	if !ok {
+		http.Error(w, "httpapi: this build cannot change MCP settings", http.StatusNotImplemented)
+		return
+	}
+	name, enabled, ok := readCapabilitySwitch(w, r)
+	if !ok {
+		return
+	}
+	state, err := settings.SetMCPEnabled(r.Context(), name, enabled)
+	if err != nil {
+		fail(w, err, http.StatusConflict)
+		return
+	}
+	writeJSON(w, normalizeMCPState(state))
+}
+
+func readCapabilitySwitch(w http.ResponseWriter, r *http.Request) (name string, enabled, ok bool) {
+	var request struct {
+		Name    string `json:"name"`
+		Enabled *bool  `json:"enabled"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&request); err != nil {
+		http.Error(w, "httpapi: bad request body: "+err.Error(), http.StatusBadRequest)
+		return "", false, false
+	}
+	name = strings.TrimSpace(request.Name)
+	if name == "" || request.Enabled == nil {
+		http.Error(w, "httpapi: name and enabled are required", http.StatusBadRequest)
+		return "", false, false
+	}
+	return name, *request.Enabled, true
+}
+
+func normalizeMCPState(state MCPState) MCPState {
+	if state.Servers == nil {
+		state.Servers = []MCPServerInfo{}
+	}
+	for index := range state.Servers {
+		if state.Servers[index].Tools == nil {
+			state.Servers[index].Tools = []MCPToolInfo{}
+		}
+	}
+	return state
+}
+
+func (s *Server) needSkillStatus(w http.ResponseWriter) (SkillStatus, bool) {
+	if !s.needHost(w) {
+		return nil, false
+	}
+	provider, ok := s.host.(SkillStatus)
+	if !ok {
+		http.Error(w, "httpapi: this build does not expose skills", http.StatusNotImplemented)
+		return nil, false
+	}
+	return provider, true
+}
+
+func (s *Server) serveSkills(w http.ResponseWriter, r *http.Request) {
+	provider, ok := s.needSkillStatus(w)
+	if !ok {
+		return
+	}
+	state, err := provider.Skills()
+	if err != nil {
+		fail(w, err, http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, normalizeSkillState(state))
+}
+
+func (s *Server) serveSkillEnabled(w http.ResponseWriter, r *http.Request) {
+	if !s.needHost(w) {
+		return
+	}
+	settings, ok := s.host.(SkillSettings)
+	if !ok {
+		http.Error(w, "httpapi: this build cannot change Skill settings", http.StatusNotImplemented)
+		return
+	}
+	name, enabled, ok := readCapabilitySwitch(w, r)
+	if !ok {
+		return
+	}
+	state, err := settings.SetSkillEnabled(r.Context(), name, enabled)
+	if err != nil {
+		fail(w, err, http.StatusConflict)
+		return
+	}
+	writeJSON(w, normalizeSkillState(state))
+}
+
+func normalizeSkillState(state SkillState) SkillState {
+	if state.Roots == nil {
+		state.Roots = []SkillRootInfo{}
+	}
+	if state.Skills == nil {
+		state.Skills = []SkillInfo{}
+	}
+	return state
+}
+
+func (s *Server) serveSkillContent(w http.ResponseWriter, r *http.Request) {
+	provider, ok := s.needSkillStatus(w)
+	if !ok {
+		return
+	}
+	name := r.URL.Query().Get("name")
+	if name == "" {
+		http.Error(w, "httpapi: empty skill name", http.StatusBadRequest)
+		return
+	}
+	detail, err := provider.SkillContent(name)
+	if err != nil {
+		fail(w, err, http.StatusNotFound)
+		return
+	}
+	writeJSON(w, detail)
+}
+
+func (s *Server) serveSkillLoad(w http.ResponseWriter, r *http.Request) {
+	provider, ok := s.needSkillStatus(w)
+	if !ok {
+		return
+	}
+	var request struct {
+		Name string `json:"name"`
+		Args string `json:"args"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&request); err != nil {
+		http.Error(w, "httpapi: bad request body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if request.Name == "" {
+		http.Error(w, "httpapi: empty skill name", http.StatusBadRequest)
+		return
+	}
+	prompt, err := provider.LoadSkillPrompt(request.Name, request.Args)
+	if err != nil {
+		fail(w, err, http.StatusNotFound)
+		return
+	}
+	writeJSON(w, map[string]string{"prompt": prompt})
+}
+
+func (s *Server) servePlugins(w http.ResponseWriter, r *http.Request) {
+	if !s.needHost(w) {
+		return
+	}
+	provider, ok := s.host.(PluginStatus)
+	if !ok {
+		http.Error(w, "httpapi: this build does not expose plugins", http.StatusNotImplemented)
+		return
+	}
+	state, err := provider.Plugins()
+	if err != nil {
+		fail(w, err, http.StatusInternalServerError)
+		return
+	}
+	if state.Plugins == nil {
+		state.Plugins = []PluginInfo{}
+	}
+	for i := range state.Plugins {
+		if state.Plugins[i].SkillNames == nil {
+			state.Plugins[i].SkillNames = []string{}
+		}
+		if state.Plugins[i].Servers == nil {
+			state.Plugins[i].Servers = []string{}
+		}
+	}
+	writeJSON(w, state)
+}
+
+func (s *Server) needBrowserStatus(w http.ResponseWriter) (BrowserStatus, bool) {
+	if !s.needHost(w) {
+		return nil, false
+	}
+	provider, ok := s.host.(BrowserStatus)
+	if !ok {
+		http.Error(w, "httpapi: this build does not expose built-in browser", http.StatusNotImplemented)
+		return nil, false
+	}
+	return provider, true
+}
+
+func (s *Server) serveBrowser(w http.ResponseWriter, r *http.Request) {
+	provider, ok := s.needBrowserStatus(w)
+	if !ok {
+		return
+	}
+	state, err := provider.BrowserState()
+	if err != nil {
+		fail(w, err, http.StatusInternalServerError)
+		return
+	}
+	if state.Tabs == nil {
+		state.Tabs = []BrowserTabInfo{}
+	}
+	writeJSON(w, state)
+}
+
+func (s *Server) serveBrowserOpen(w http.ResponseWriter, r *http.Request) {
+	provider, ok := s.needBrowserStatus(w)
+	if !ok {
+		return
+	}
+	var request struct {
+		URL string `json:"url"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&request); err != nil && !errors.Is(err, io.EOF) {
+		http.Error(w, "httpapi: bad request body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	tab, err := provider.BrowserOpen(request.URL)
+	if err != nil {
+		fail(w, err, http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, tab)
+}
+
+func (s *Server) serveBrowserNavigate(w http.ResponseWriter, r *http.Request) {
+	provider, ok := s.needBrowserStatus(w)
+	if !ok {
+		return
+	}
+	var request struct {
+		TabID string `json:"tabId"`
+		URL   string `json:"url"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&request); err != nil {
+		http.Error(w, "httpapi: bad request body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	tab, err := provider.BrowserNavigate(request.TabID, request.URL)
+	if err != nil {
+		fail(w, err, http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, tab)
+}
+
+func (s *Server) serveBrowserAction(w http.ResponseWriter, r *http.Request) {
+	provider, ok := s.needBrowserStatus(w)
+	if !ok {
+		return
+	}
+	var request struct {
+		TabID  string `json:"tabId"`
+		Action string `json:"action"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&request); err != nil {
+		http.Error(w, "httpapi: bad request body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if err := provider.BrowserAction(request.TabID, request.Action); err != nil {
+		fail(w, err, http.StatusBadRequest)
+		return
+	}
+	state, err := provider.BrowserState()
+	if err != nil {
+		fail(w, err, http.StatusInternalServerError)
+		return
+	}
+	if state.Tabs == nil {
+		state.Tabs = []BrowserTabInfo{}
+	}
+	writeJSON(w, state)
+}
+
+func (s *Server) serveBrowserScreenshot(w http.ResponseWriter, r *http.Request) {
+	provider, ok := s.needBrowserStatus(w)
+	if !ok {
+		return
+	}
+	capture, err := provider.BrowserScreenshot(r.URL.Query().Get("tabId"))
+	if err != nil {
+		fail(w, err, http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, capture)
 }
 
 func (s *Server) serveStats(w http.ResponseWriter, r *http.Request) {

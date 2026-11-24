@@ -2,7 +2,6 @@ package fs
 
 import (
 	"context"
-	"os"
 	"path/filepath"
 	"strings"
 )
@@ -13,6 +12,7 @@ import (
 // a result limit must stop the walk immediately rather than drain the tree.
 type walker struct {
 	ctx     context.Context
+	set     *shared
 	ignores *ignoreStack
 	// visit is called for every entry that survived pruning. Returning false
 	// stops the walk.
@@ -24,12 +24,10 @@ type walker struct {
 type walkEntry struct {
 	// Rel is the path relative to the walk root, with forward slashes.
 	Rel string
-	// Path is the absolute path.
+	// Path is the path used by the filesystem operations.
 	Path string
 	// IsDir reports whether the entry is a directory.
 	IsDir bool
-	// Size is the file size in bytes, zero for directories.
-	Size int64
 }
 
 // walkTree calls w.visit for each entry under root. Symbolic links are not
@@ -42,7 +40,7 @@ func (w *walker) walkDir(dir, prefix string) error {
 	if err := w.ctx.Err(); err != nil {
 		return err
 	}
-	entries, err := os.ReadDir(dir)
+	entries, err := w.set.readDir(dir)
 	if err != nil {
 		// An unreadable directory is not fatal: a permission error deep in a
 		// tree should not fail the whole search.
@@ -52,7 +50,7 @@ func (w *walker) walkDir(dir, prefix string) error {
 		return nil
 	}
 
-	pushed := w.ignores.push(dir, prefix)
+	pushed := w.ignores.push(dir, prefix, w.set.readFile)
 	defer w.ignores.pop(pushed)
 
 	for _, entry := range entries {
@@ -69,7 +67,7 @@ func (w *walker) walkDir(dir, prefix string) error {
 		if prefix != "" {
 			rel = prefix + "/" + name
 		}
-		full := filepath.Join(dir, name)
+		full := joinAccessPath(dir, name)
 		isDir := entry.IsDir()
 		if w.ignores.ignored(rel, isDir) {
 			continue
@@ -94,11 +92,7 @@ func (w *walker) walkDir(dir, prefix string) error {
 		if !entry.Type().IsRegular() {
 			continue
 		}
-		var size int64
-		if info, err := entry.Info(); err == nil {
-			size = info.Size()
-		}
-		more, err := w.visit(walkEntry{Rel: rel, Path: full, IsDir: false, Size: size})
+		more, err := w.visit(walkEntry{Rel: rel, Path: full})
 		if err != nil {
 			return err
 		}

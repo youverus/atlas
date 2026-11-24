@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -20,7 +21,12 @@ import (
 // servers' tools. Failures are reported once as warnings and stay visible in
 // /mcp afterwards, so "the server has no tools" and "the server's tools are
 // missing" never look the same.
+//
+// The owner serializes Enable, Disable, and Close. Readers and refreshes can
+// run concurrently with those operations.
 type Set struct {
+	identity Identity
+
 	// mu guards the servers and the tool lists inside them. They are no longer
 	// fixed: a server that says its tools changed is listed again while the
 	// session runs, so every read has to be one that a refresh cannot tear.
@@ -73,7 +79,9 @@ type Server struct {
 
 // liveServer is the state a refresh needs and a reader does not.
 type liveServer struct {
-	mu sync.Mutex
+	ctx    context.Context
+	cancel context.CancelFunc
+	mu     sync.Mutex
 	// refreshing is true while a listing is in flight, and dirty records that
 	// another notification arrived while it was: a server that changed twice in
 	// one round trip is listed once more, not twice.
@@ -105,18 +113,67 @@ func Open(ctx context.Context, specs []Spec, id Identity) *Set {
 	// and /mcp agree on one order, and makes two runs of the same config produce
 	// the same prompt.
 	sort.SliceStable(built, func(i, j int) bool { return built[i].Name < built[j].Name })
-	set := &Set{servers: built}
+	set := &Set{identity: id, servers: built}
 	assignNames(built)
-	// The hooks go in last: a notification can only arrive once a transport is
-	// reading, and the servers are visible from here on. What arrived earlier is
-	// remembered by the connection and listed again below.
-	set.watch()
+	// Install the hooks after publishing the servers so a pending notification
+	// can refresh the live tool list.
+	for _, server := range built {
+		set.watch(server)
+	}
 	return set
+}
+
+// Enable connects and publishes one server. A connection failure is published
+// as a server with no tools, so a later Enable can retry it.
+func (s *Set) Enable(ctx context.Context, spec Spec) {
+	s.mu.RLock()
+	index, found := s.serverIndex(spec.Name)
+	connected := found && s.servers[index].session != nil
+	s.mu.RUnlock()
+	if connected {
+		return
+	}
+
+	server := openServer(ctx, spec, s.identity)
+	s.mu.Lock()
+	if found {
+		s.servers[index] = server
+	} else {
+		s.servers = slices.Insert(s.servers, index, server)
+	}
+	assignNames(s.servers)
+	s.mu.Unlock()
+	s.watch(server)
+}
+
+// Disable removes one server from future snapshots, then closes its connection.
+func (s *Set) Disable(name string) {
+	s.mu.Lock()
+	index, found := s.serverIndex(name)
+	if !found {
+		s.mu.Unlock()
+		return
+	}
+	server := s.servers[index]
+	s.servers = slices.Delete(s.servers, index, index+1)
+	s.mu.Unlock()
+	server.close()
+}
+
+// serverIndex searches the sorted servers with mu held.
+func (s *Set) serverIndex(name string) (int, bool) {
+	return slices.BinarySearchFunc(s.servers, name, func(server *Server, name string) int {
+		return strings.Compare(server.Name, name)
+	})
 }
 
 // openServer connects one server and lists its tools under one deadline.
 func openServer(ctx context.Context, spec Spec, id Identity) *Server {
-	server := &Server{Name: spec.Name, spec: spec, live: &liveServer{}}
+	server := &Server{Name: spec.Name, spec: spec}
+	if err := ctx.Err(); err != nil {
+		server.Err = err
+		return server
+	}
 	// A server that authorizes with OAuth and has no token is not asked
 	// anything. A 401 at startup would say "you are not logged in" more slowly
 	// and nothing else, and the login is a command the user runs, not something
@@ -143,8 +200,20 @@ func openServer(ctx context.Context, spec Spec, id Identity) *Server {
 		return server
 	}
 	server.session = session
+	// A refresh belongs to the connection, which outlives the handshake.
+	liveCtx, stop := context.WithCancel(context.Background())
+	server.live = &liveServer{ctx: liveCtx, cancel: stop}
 	server.setTools(defs)
 	return server
+}
+
+func (s *Server) close() {
+	if s.session == nil {
+		return
+	}
+	s.live.cancel()
+	s.session.watch(nil)
+	_ = s.session.Close()
 }
 
 // setTools records one listing: everything the server declared, and the part the
@@ -154,6 +223,10 @@ func openServer(ctx context.Context, spec Spec, id Identity) *Server {
 // questions: how many tools this session has, and whether the list that narrowed
 // them is doing what its author meant.
 func (s *Server) setTools(defs []toolDef) {
+	previousNames := make(map[string]string, len(s.Tools))
+	for _, remote := range s.Tools {
+		previousNames[remote.Name] = remote.WireName
+	}
 	s.Declared = len(defs)
 	s.Tools = make([]RemoteTool, 0, len(defs))
 	s.Missing = nil
@@ -170,9 +243,11 @@ func (s *Server) setTools(defs []toolDef) {
 			Server:      s.Name,
 			Name:        def.Name,
 			Title:       def.Title,
+			WireName:    previousNames[def.Name],
 			Description: def.Description,
 			Schema:      def.InputSchema,
 		})
+		delete(previousNames, def.Name)
 	}
 	for _, name := range s.spec.Tools {
 		if !declared[name] {
@@ -200,6 +275,17 @@ func (s *Set) Servers() []*Server {
 		servers[index] = &snapshot
 	}
 	return servers
+}
+
+// Specs returns a snapshot of the enabled server declarations in sorted order.
+func (s *Set) Specs() []Spec {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var specs []Spec
+	for _, server := range s.servers {
+		specs = append(specs, server.spec)
+	}
+	return specs
 }
 
 // Tools wraps every tool of every connected server for the model.
@@ -260,31 +346,17 @@ func (s *Set) Close() {
 		return
 	}
 	s.mu.RLock()
-	sessions := make([]*client, 0, len(s.servers))
-	for _, server := range s.servers {
-		if server.session != nil {
-			sessions = append(sessions, server.session)
-		}
-	}
+	servers := slices.Clone(s.servers)
 	s.mu.RUnlock()
-	for _, session := range sessions {
-		_ = session.Close()
+	for _, server := range servers {
+		server.close()
 	}
 }
 
-// watch installs the tool-list hook on every connection, and lists again the
-// servers whose change arrived before there was a hook to call.
-func (s *Set) watch() {
-	s.mu.RLock()
-	servers := append([]*Server(nil), s.servers...)
-	s.mu.RUnlock()
-	for _, server := range servers {
-		if server.session == nil {
-			continue
-		}
-		if server.session.watch(func() { s.refresh(server) }) {
-			s.refresh(server)
-		}
+// watch installs the tool-list hook and handles any earlier notification.
+func (s *Set) watch(server *Server) {
+	if server.session != nil && server.session.watch(func() { s.refresh(server) }) {
+		s.refresh(server)
 	}
 }
 
@@ -321,12 +393,18 @@ func (s *Set) refresh(server *Server) {
 // is still connected, so the list in hand is the best available guess about what
 // it can still do.
 func (s *Set) relist(server *Server) error {
-	ctx, cancel := context.WithTimeout(context.Background(), handshakeTimeout)
+	ctx, cancel := context.WithTimeout(server.live.ctx, handshakeTimeout)
 	defer cancel()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	defs, err := server.session.listTools(ctx)
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := server.live.ctx.Err(); err != nil {
+		return err
+	}
 	if err != nil {
 		server.RefreshErr = err
 		return err
@@ -337,6 +415,41 @@ func (s *Set) relist(server *Server) error {
 	// appeared cannot take a name another server already uses.
 	assignNames(s.servers)
 	return nil
+}
+
+// Refresh re-lists tools from the named connected server, or from every
+// connected server when name is empty.
+func (s *Set) Refresh(name string) error {
+	if s == nil {
+		return nil
+	}
+	s.mu.RLock()
+	servers := append([]*Server(nil), s.servers...)
+	s.mu.RUnlock()
+
+	if name != "" {
+		for _, server := range servers {
+			if server.Name != name {
+				continue
+			}
+			if server.session == nil {
+				return fmt.Errorf("mcp: server %q is not connected", name)
+			}
+			return s.relist(server)
+		}
+		return fmt.Errorf("mcp: unknown server %q", name)
+	}
+
+	var firstErr error
+	for _, server := range servers {
+		if server.session == nil {
+			continue
+		}
+		if err := s.relist(server); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
 }
 
 // quoteList formats names for one line of prose: "a", "b" and "c".
@@ -367,14 +480,23 @@ const toolNameLimit = 64
 // taste — the same entry in two clients should produce the same tool, and a
 // model that has met one should recognise the other.
 //
-// Collisions are resolved with a hash of the pair rather than with a counter, so
-// a name depends only on where the tool came from: a session resumed while one
-// server is down keeps every other name stable.
+// Reserve published names before assigning new ones so toggling a server does
+// not rename tools on a different connection with a colliding normalized name.
 func assignNames(servers []*Server) {
 	seen := make(map[string]bool, 16)
 	for _, server := range servers {
+		for _, remote := range server.Tools {
+			if remote.WireName != "" {
+				seen[remote.WireName] = true
+			}
+		}
+	}
+	for _, server := range servers {
 		for index := range server.Tools {
 			remote := &server.Tools[index]
+			if remote.WireName != "" {
+				continue
+			}
 			name := normalizeName(ToolPrefix + server.Name + "__" + remote.Name)
 			if seen[name] || len(name) > toolNameLimit {
 				name = hashedName(name, remote.Server, remote.Name)

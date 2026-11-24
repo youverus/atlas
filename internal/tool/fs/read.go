@@ -5,7 +5,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"os"
 	"strings"
 
 	"pi-go/internal/tool"
@@ -66,8 +65,7 @@ func (t readTool) Execute(ctx context.Context, call tool.Call, onUpdate func(too
 		return tool.Result{}, err
 	}
 
-	absolute := resolveReadPath(request.Path, t.set.cwd)
-	raw, err := os.ReadFile(absolute)
+	raw, err := t.set.readUserFile(request.Path)
 	if err != nil {
 		return tool.Result{}, err
 	}
@@ -80,6 +78,28 @@ func (t readTool) Execute(ctx context.Context, call tool.Call, onUpdate func(too
 	}
 
 	return t.textResult(string(raw), request)
+}
+
+func (s *shared) readUserFile(name string) ([]byte, error) {
+	if s.root == nil {
+		return s.readFile(resolveReadPath(name, s.cwd))
+	}
+	path, err := s.resolveAccess(name)
+	if err != nil {
+		return nil, err
+	}
+	raw, err := s.readFile(path)
+	if !isNotExist(err) {
+		return raw, err
+	}
+	for _, candidate := range alternatives(path) {
+		if candidate != path {
+			if data, candidateErr := s.readFile(candidate); candidateErr == nil {
+				return data, nil
+			}
+		}
+	}
+	return nil, err
 }
 
 func (t readTool) imageResult(mimeType, data string) tool.Result {

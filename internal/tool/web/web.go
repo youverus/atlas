@@ -1,5 +1,5 @@
 // Package web implements the two tools that reach outside the machine:
-// websearch and webfetch.
+// deepseek_web_search and deepseek_web_fetch.
 //
 // Both are clients of one vendor endpoint rather than a crawler. That is a
 // decision, not a shortcut: turning a page into Markdown needs a browser-grade
@@ -237,7 +237,7 @@ func explain(name string, err error) error {
 	case http.StatusBadRequest:
 		return fmt.Errorf("%s: the endpoint rejected the arguments: %s", name, api.message)
 	case http.StatusUnauthorized:
-		return fmt.Errorf("%s: the credential was rejected; check web.apiKeyEnv in the config", name)
+		return fmt.Errorf("%s: the credential was rejected; check web.apiKeyEnv or providers.deepseek credentials in config.json", name)
 	case http.StatusPaymentRequired:
 		return fmt.Errorf("%s: the account has no balance, so search and fetch are unavailable until it is topped up", name)
 	case http.StatusForbidden:

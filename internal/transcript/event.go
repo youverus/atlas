@@ -1,6 +1,7 @@
 package transcript
 
 import (
+	"encoding/json"
 	"strings"
 	"time"
 
@@ -195,7 +196,7 @@ func (t *Transcript) endTool(event wire.AgentEvent) {
 	if failed {
 		detail = resultBody(texts)
 	}
-	if failed && t.stopped {
+	if failed && (t.stopped || event.Aborted != nil && *event.Aborted) {
 		// The call did not fail: the turn was taken out from under it, and the
 		// body is the kernel saying so in its own words ("Operation aborted",
 		// "Command aborted"). One word in the note is the whole of what the
@@ -212,6 +213,10 @@ func (t *Transcript) endTool(event wire.AgentEvent) {
 		// transcript is replayed from messages rather than events.
 		i = t.Append(Block{Role: RoleTool, Name: event.ToolName, ID: event.ToolCallID})
 	}
+	var artifactRef *wire.ArtifactRef
+	if !failed && !(t.stopped || event.Aborted != nil && *event.Aborted) && wire.IsArtifactProducer(event.ToolName) {
+		artifactRef = parseArtifactDetailsFromResult(event.Result)
+	}
 	t.Update(i, func(block *Block) {
 		block.Open = false
 		block.Name = firstNonEmpty(block.Name, event.ToolName)
@@ -224,7 +229,27 @@ func (t *Transcript) endTool(event wire.AgentEvent) {
 		// to it.
 		block.Note = joinNote(withoutNote(block.Note, "running"), note)
 		block.Detail = detail
+		if artifactRef != nil {
+			block.Artifact = artifactRef
+		}
 	})
+}
+
+func parseArtifactDetailsFromResult(raw json.RawMessage) *wire.ArtifactRef {
+	if len(raw) == 0 {
+		return nil
+	}
+	var envelope struct {
+		Details json.RawMessage `json:"details"`
+	}
+	if err := json.Unmarshal(raw, &envelope); err != nil || len(envelope.Details) == 0 {
+		return nil
+	}
+	var ref wire.ArtifactRef
+	if err := json.Unmarshal(envelope.Details, &ref); err != nil || ref.ID == "" {
+		return nil
+	}
+	return &ref
 }
 
 // openRole returns the index of the last block if it has the given role, and

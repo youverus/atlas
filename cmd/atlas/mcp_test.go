@@ -32,7 +32,7 @@ func (t namedTool) Execute(context.Context, tool.Call, func(tool.Partial)) (tool
 // TestMCPToolsShareOneFooterGroup is the footer rule: the grant a reader made was
 // "this server", so its forty tools are one column and not forty.
 func TestMCPToolsShareOneFooterGroup(t *testing.T) {
-	set := workspaceTools(t.TempDir(), []tool.Tool{namedTool{"websearch"}}, []tool.Tool{
+	set := workspaceTools(t.TempDir(), []tool.Tool{namedTool{"deepseek_web_search"}}, []tool.Tool{
 		namedTool{"mcp__fs__read_file"},
 		namedTool{"mcp__fs__write_file"},
 		namedTool{"mcp__docs__search"},

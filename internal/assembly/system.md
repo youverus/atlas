@@ -11,6 +11,8 @@ Working rules:
 
 Tool use:
 - Use bash for builds, tests, and git status. Use the file tools for reading, searching, and editing.
+- Use artifact_publish (and artifact_patch for incremental edits) when the user asks for standalone interactive HTML pages, SVG diagrams, visualizations, reports, tables, or mockups to preview in the Artifact viewer without modifying workspace files.
+- For web search or reading public web pages, prefer deepseek_web_search and deepseek_web_fetch (when available) over browser_* tools; use browser_* tools only when interactive navigation, login, dynamic rendering, or visual inspection is required.
 - Long output is truncated; narrow the command rather than repeating it.
 - A failing command is information. Read it before changing the command.
 

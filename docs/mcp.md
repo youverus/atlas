@@ -131,6 +131,7 @@ SSE 分帧想复用 `internal/provider/sse`：它的 `Event` 已经带 `ID` / `N
 
 - 沿用 `mcpServers` 这个键名与 `command` / `args` / `env` / `cwd` / `url` / `headers` 这些字段名，理由同第 5 节：别的客户端的条目能直接搬。
 - 两级文件：全局 `$ATLAS_HOME/mcp.json`，项目 `<cwd>/.atlas/mcp.json`（项目级目录沿用 `theme` 的约定，`internal/theme/library.go:292`）。项目级只覆盖 `enabled`，`command` / `url` / `headers` / `auth` / `scopes` / `tools` 出现在项目级就是错误——一个能改 argv 或加凭据的项目文件是仓库里的代码执行，而 atlas 没有 pi 的"项目被信任"那套。项目条目引用的名字必须在全局里存在，否则报错：静默忽略会让"我明明写了"变成一次猜谜。
+- 桌面 MCP 开关按服务名称保存到 `$ATLAS_HOME/capabilities.json`，覆盖全局、插件和项目的 `enabled` 值。停用会关闭当前连接，并从后续对话轮次移除该服务的工具定义。重新启用只连接这一项。
 - `type` 可省：有 `url` 就是 http，有 `command` 就是 stdio，两个都有或都没有就报错。`"type": "sse"` 明确拒绝并指向 streamable HTTP 的 `/mcp` 端点。
 - `timeout` 秒，缺省 60，语义照抄 pi。第一版按调用计时而不是按会话，理由见第 10 节第 4 条。
 - `description` 第一版不认：它进的是系统提示词的服务器列表，而 atlas 的 `system.md` 是静态的，加一段要动 `Prompts`（`internal/assembly/prompt.go`）。没有消费者的键不写进解析器。

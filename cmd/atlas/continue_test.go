@@ -298,7 +298,7 @@ func TestContinueRefusesAnArchivedSession(t *testing.T) {
 		return app.Result{}, nil
 	}
 	_, err = replCommand(context.Background(), application, nil, "/continue", models{},
-		newSessionPicker(application, ""), nil, emptyPrompts(), out, render, mcpState{}, nil, turn)
+		newSessionPicker(application, ""), nil, emptyPrompts(), out, render, mcpState{}, turn)
 	if !errors.Is(err, app.ErrArchived) {
 		t.Fatalf("/continue = %v, want ErrArchived", err)
 	}

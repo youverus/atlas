@@ -123,11 +123,16 @@ func Load(roots []Root, limits Limits) ([]Skill, []string) {
 	skills := make([]Skill, 0, 8)
 	notes := make([]string, 0, 4)
 	owner := make(map[string]string, 8)
+	seenRoots := make(map[string]struct{}, len(roots))
 	for _, root := range roots {
 		dir := root.Dir
 		if absolute, err := filepath.Abs(dir); err == nil {
 			dir = absolute
 		}
+		if _, seen := seenRoots[dir]; seen {
+			continue
+		}
+		seenRoots[dir] = struct{}{}
 		for _, file := range discover(dir) {
 			found, foundNotes := loadFile(file, root.Scope, limits)
 			notes = append(notes, foundNotes...)

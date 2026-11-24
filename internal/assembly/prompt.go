@@ -4,9 +4,11 @@ import (
 	_ "embed"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 
+	"pi-go/internal/compact"
 	"pi-go/internal/config"
 	"pi-go/internal/skill"
 )
@@ -88,38 +90,105 @@ type PromptBuild struct {
 // caveat. They are returned rather than printed because a rebuild happens where
 // there is no terminal writer, and a second scan to print them would answer a
 // question the first scan already answered.
+type PromptSummary struct {
+	Text               string
+	SystemPromptTokens int
+	ContextFiles       []string
+	ContextFilesTokens int
+	AgentsMDLoaded     bool
+	Skills             int
+	SkillsTokens       int
+}
+
+type promptRender struct {
+	build              PromptBuild
+	contextFilesTokens int
+	skillsTokens       int
+	agentsMDLoaded     bool
+}
+
 func (b Prompts) Build(cwd string) (PromptBuild, error) {
-	base, err := BasePrompt(b.file)
+	rendered, err := b.render(cwd)
 	if err != nil {
 		return PromptBuild{}, err
 	}
+	return rendered.build, nil
+}
+
+// Inspect returns the prompt and a token/component breakdown for cwd.
+func (b Prompts) Inspect(cwd string) (PromptSummary, error) {
+	rendered, err := b.render(cwd)
+	if err != nil {
+		return PromptSummary{}, err
+	}
+	return PromptSummary{
+		Text:               rendered.build.Text,
+		SystemPromptTokens: compact.EstimateTextTokens(rendered.build.Text),
+		ContextFiles:       rendered.build.ContextFiles,
+		ContextFilesTokens: rendered.contextFilesTokens,
+		AgentsMDLoaded:     rendered.agentsMDLoaded,
+		Skills:             rendered.build.Skills,
+		SkillsTokens:       rendered.skillsTokens,
+	}, nil
+}
+
+func (b Prompts) render(cwd string) (promptRender, error) {
+	base, err := BasePrompt(b.file)
+	if err != nil {
+		return promptRender{}, err
+	}
 	var blocks []string
 	var contextFiles []string
+	contextFilesTokens := 0
+	agentsMDLoaded := false
 	if !b.noContext {
 		context, files, err := ProjectContext(cwd)
 		if err != nil {
-			return PromptBuild{}, err
+			return promptRender{}, err
 		}
 		if context != "" {
 			blocks = append(blocks, context)
 			contextFiles = files
+			contextFilesTokens = compact.EstimateTextTokens(context)
+			for _, file := range files {
+				if isAgentsInstructionFile(file) {
+					agentsMDLoaded = true
+					break
+				}
+			}
 		}
 	}
 	var notes []string
 	skills := 0
+	skillsTokens := 0
 	if !b.noSkills {
 		found, skillNotes := AvailableSkills(cwd)
 		notes = skillNotes
 		skills = len(found)
 		if directory := skill.Directory(found); directory != "" {
 			blocks = append(blocks, directory)
+			skillsTokens = compact.EstimateTextTokens(directory)
 		}
 	}
 	text := base
 	if len(blocks) > 0 {
 		text = strings.TrimRight(base, "\n") + "\n\n" + strings.Join(blocks, "\n\n") + "\n"
 	}
-	return PromptBuild{Text: text, ContextFiles: contextFiles, Skills: skills, Notes: notes}, nil
+	return promptRender{
+		build:              PromptBuild{Text: text, ContextFiles: contextFiles, Skills: skills, Notes: notes},
+		contextFilesTokens: contextFilesTokens,
+		skillsTokens:       skillsTokens,
+		agentsMDLoaded:     agentsMDLoaded,
+	}, nil
+}
+
+func isAgentsInstructionFile(path string) bool {
+	switch filepath.Base(path) {
+	case "AGENTS.md", "AGENTS.override.md", "AGENTS.MD":
+		return true
+	default:
+		return false
+	}
 }
 
 // note says whether the context files were read, for the one command whose
@@ -187,8 +256,17 @@ func (s *PromptSource) Last() PromptBuild {
 	return s.build
 }
 
-// note says whether the context files were read, for the one command whose
+// Note says whether the context files were read, for the one command whose
 // output is about them.
 func (s *PromptSource) Note() string {
 	return s.builder.Note()
+}
+
+// Inspect returns the prompt and component breakdown for cwd without mutating
+// Last's cached build.
+func (s *PromptSource) Inspect(cwd string) (PromptSummary, error) {
+	if s == nil {
+		return NewPrompts("", false, false).Inspect(cwd)
+	}
+	return s.builder.Inspect(cwd)
 }

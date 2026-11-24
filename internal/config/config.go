@@ -135,6 +135,14 @@ type Config struct {
 	// empty block is a reader who turned it on and expects the defaults.
 	Update *Update `json:"update"`
 
+	// Browser configures the managed Chromium tool service. Omitting the block
+	// keeps headless auto-detected (on when Linux/Unix has no display server,
+	// off on desktop environments).
+	Browser *Browser `json:"browser"`
+
+	// Subagents configures model selection for background delegations.
+	Subagents *Subagents `json:"subagents,omitempty"`
+
 	// UI is the contents of the file TUI names, filled by Load. It carries no
 	// JSON tags of its own: config.json cannot set these fields, so a reader
 	// looking for a color or a gap has exactly one place to look.
@@ -562,6 +570,65 @@ func (u Update) validate() error {
 	return nil
 }
 
+// Subagents gives background tasks optional model settings by role and a shared default.
+type Subagents struct {
+	Default SubagentModel            `json:"default,omitempty"`
+	Roles   map[string]SubagentModel `json:"roles,omitempty"`
+}
+
+// SubagentModel selects a configured model and optionally names a thinking level.
+type SubagentModel struct {
+	Model         string `json:"model,omitempty"`
+	ThinkingLevel string `json:"thinkingLevel,omitempty"`
+}
+
+func (s Subagents) validate() error {
+	if err := s.Default.validate(); err != nil {
+		return fmt.Errorf("default: %w", err)
+	}
+	names := make([]string, 0, len(s.Roles))
+	for role := range s.Roles {
+		names = append(names, role)
+	}
+	sort.Strings(names)
+	for _, role := range names {
+		if role != "explorer" && role != "verifier" {
+			return fmt.Errorf("unknown role %q (expected explorer or verifier)", role)
+		}
+		if err := s.Roles[role].validate(); err != nil {
+			return fmt.Errorf("roles.%s: %w", role, err)
+		}
+	}
+	return nil
+}
+
+func (m SubagentModel) validate() error {
+	if strings.TrimSpace(m.Model) == "" && (m.Model != "" || m.ThinkingLevel != "") {
+		return errors.New("model must be specified for a subagent model setting")
+	}
+	if m.ThinkingLevel != "" && !ValidThinkingLevel(m.ThinkingLevel) {
+		return fmt.Errorf("thinkingLevel %q is not one of: %s", m.ThinkingLevel, strings.Join(ThinkingLevels, ", "))
+	}
+	return nil
+}
+
+// Browser configures the managed Chromium browser.
+type Browser struct {
+	// Headless controls whether Chromium runs with --headless=new. Nil means
+	// auto-detect (true when Linux/Unix has neither DISPLAY nor WAYLAND_DISPLAY).
+	Headless *bool `json:"headless"`
+
+	// Executable overrides browser binary discovery when ATLAS_BROWSER_BIN is unset.
+	Executable string `json:"executable"`
+}
+
+func (b Browser) validate() error {
+	if b.Executable != "" && strings.TrimSpace(b.Executable) == "" {
+		return errors.New("executable cannot be whitespace")
+	}
+	return nil
+}
+
 // Provider is one endpoint and its models. The name it is keyed by is the
 // provider half of "provider/model".
 type Provider struct {
@@ -768,8 +835,11 @@ func Load(path string) (*Config, error) {
 	if info.Size() > maxSize {
 		return nil, fmt.Errorf("config: %s: %d bytes exceeds the %d byte limit", path, info.Size(), maxSize)
 	}
+	return decodeConfig(io.LimitReader(handle, maxSize), path)
+}
 
-	decoder := json.NewDecoder(io.LimitReader(handle, maxSize))
+func decodeConfig(r io.Reader, path string) (*Config, error) {
+	decoder := json.NewDecoder(r)
 	decoder.DisallowUnknownFields()
 	var cfg Config
 	if err := decoder.Decode(&cfg); err != nil {
@@ -861,6 +931,16 @@ func (c *Config) Validate() error {
 	if c.Update != nil {
 		if err := c.Update.validate(); err != nil {
 			return fmt.Errorf("update: %w", err)
+		}
+	}
+	if c.Browser != nil {
+		if err := c.Browser.validate(); err != nil {
+			return fmt.Errorf("browser: %w", err)
+		}
+	}
+	if c.Subagents != nil {
+		if err := c.Subagents.validate(); err != nil {
+			return fmt.Errorf("subagents: %w", err)
 		}
 	}
 	// The appearance is checked as one thing: the theme's shape and the
@@ -1061,10 +1141,10 @@ func (p Provider) Key() string { return envKey(p.APIKey, p.APIKeyEnv) }
 // the web endpoint because two spellings of "which key do I use" is exactly the
 // kind of difference nobody discovers until a request fails.
 func envKey(literal, env string) string {
-	if env != "" {
-		if value := os.Getenv(env); value != "" {
+	if env = strings.TrimSpace(env); env != "" {
+		if value := strings.TrimSpace(os.Getenv(env)); value != "" {
 			return value
 		}
 	}
-	return literal
+	return strings.TrimSpace(literal)
 }

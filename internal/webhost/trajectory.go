@@ -17,7 +17,7 @@ import (
 // means. A session with no leaf folds to nothing: the window then shows an empty
 // view instead of a plausible path the kernel never took.
 func (h *Host) Trajectory() ([]httpapi.TrajectoryRow, error) {
-	manager := h.kernel.App.Session()
+	manager := h.activeSlot().live.App.Session()
 	rows := trajectory.Fold(manager.Entries(), manager.LeafID())
 	out := make([]httpapi.TrajectoryRow, 0, len(rows))
 	for _, row := range rows {

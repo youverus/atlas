@@ -34,8 +34,18 @@ export default defineConfig({
     sourcemap: false,
     // KaTeX is 278 KB of this bundle and any answer containing a formula needs
     // it, so it is not split out: a second chunk would make the first formula
-    // arrive a frame after the text around it. 709 KB is the whole page.
-    chunkSizeWarningLimit: 800,
+    // arrive a frame after the text around it. The api contract layer is a
+    // shared chunk since the desktop pet's page imports it too, which pushes
+    // the main chunk just past 800 KB; 950 keeps the build quiet.
+    chunkSizeWarningLimit: 950,
+    // Two entries: the main window and the desktop pet's tiny companion page
+    // (/pet.html), which the shell loads into a second frameless window.
+    rollupOptions: {
+      input: {
+        main: "index.html",
+        pet: "pet.html",
+      },
+    },
   },
   server: {
     // `vite dev` talks to a running atlas-desktop through this proxy, so the

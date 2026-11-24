@@ -12,18 +12,24 @@ import (
 // the first time either changed. This is the translation into the transport's
 // shape and nothing else.
 func (h *Host) Transcript() ([]httpapi.TranscriptBlock, error) {
-	blocks := transcript.Replay(h.kernel.App.Messages())
+	blocks := transcript.Replay(h.activeSlot().live.App.Messages())
 	out := make([]httpapi.TranscriptBlock, 0, len(blocks))
 	for _, block := range blocks {
 		out = append(out, httpapi.TranscriptBlock{
-			Role:   block.Role.String(),
-			Name:   block.Name,
-			Text:   block.Text,
-			Note:   block.Note,
-			Detail: block.Detail,
-			Args:   block.Args,
-			Result: block.Result,
-			ID:     block.ID,
+			Role:         block.Role.String(),
+			Name:         block.Name,
+			Text:         block.Text,
+			Note:         block.Note,
+			Detail:       block.Detail,
+			Args:         block.Args,
+			Result:       block.Result,
+			ID:           block.ID,
+			Subagent:     block.Subagent,
+			Artifact:     block.Artifact,
+			ErrorCode:    block.ErrorCode,
+			Timestamp:    block.Timestamp,
+			DurationMs:   block.DurationMs,
+			TokensPerSec: block.TokensPerSec,
 		})
 	}
 	return out, nil

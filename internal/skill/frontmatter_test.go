@@ -60,6 +60,31 @@ func TestTheFrontmatterSubset(t *testing.T) {
 			map[string]string{"description": "one\ntwo"},
 		},
 		{
+			"a folded description with a strip indicator",
+			"name: release\ndescription: >-\n  Use this when: a release is ready.\n  Keep going.",
+			map[string]string{"name": "release", "description": "Use this when: a release is ready. Keep going."},
+		},
+		{
+			"a folded block with a keep indicator",
+			"description: >+\n  one\n  two\n\nname: release",
+			map[string]string{"name": "release", "description": "one two"},
+		},
+		{
+			"a literal block with a strip indicator and a comment",
+			"description: |- # retain the internal newline\n  one\n  two",
+			map[string]string{"description": "one\ntwo"},
+		},
+		{
+			"a literal block with a keep indicator",
+			"description: |+\n  one\n  two\n",
+			map[string]string{"description": "one\ntwo"},
+		},
+		{
+			"a quoted block indicator is a string",
+			`description: ">-"`,
+			map[string]string{"description": ">-"},
+		},
+		{
 			"a block with deeper indentation kept",
 			"description: |\n  one\n    two",
 			map[string]string{"description": "one\n  two"},

@@ -9,9 +9,11 @@
 // Blocks are updated in place by id rather than rebuilt, so a streaming answer
 // appends to the last block instead of re-rendering the transcript.
 
-import type { AgentEvent, TranscriptBlock } from "../api";
+import type { AgentEvent, ArtifactRef, SubagentUpdate, TranscriptBlock } from "../api";
 
 export type Role = "user" | "answer" | "thinking" | "tool" | "notice" | "error" | "receipt";
+
+const STOPPED_NOTICE = "已停止本轮";
 
 export interface Block {
   id: number;
@@ -27,8 +29,15 @@ export interface Block {
   /** What the call returned, in full. */
   result?: string;
   callId?: string;
+  subagent?: SubagentUpdate;
+  artifact?: ArtifactRef;
   open: boolean;
   error?: boolean;
+  errorCode?: string;
+  startedAt?: number;
+  endedAt?: number;
+  durationMs?: number;
+  tokensPerSec?: number;
 }
 
 let nextId = 1;
@@ -93,9 +102,47 @@ function resultText(value: unknown): string {
   return expand(value, RESULT_LIMIT);
 }
 
+function subagentReceipt(result: unknown, callId?: string): SubagentUpdate | undefined {
+  if (!result || typeof result !== "object") return undefined;
+  const { details } = result as { details?: SubagentUpdate };
+  if (details?.id && details.state === "queued" && details.toolCallId === callId) return details;
+  return undefined;
+}
 
-function closeOpen(blocks: Block[]): Block[] {
-  return blocks.map((block) => (block.open ? { ...block, open: false } : block));
+export function isArtifactProducerTool(name?: string): boolean {
+  return name === "artifact_publish" || name === "artifact_patch";
+}
+
+function artifactReceipt(
+  result: unknown,
+  isError?: boolean,
+  aborted?: boolean,
+  name?: string,
+): ArtifactRef | undefined {
+  if (isError || aborted || !isArtifactProducerTool(name)) return undefined;
+  if (!result || typeof result !== "object") return undefined;
+  const { details } = result as { details?: Partial<ArtifactRef> };
+  if (!details || typeof details.id !== "string" || !details.id) return undefined;
+  if (typeof details.kind !== "string" || !details.kind) return undefined;
+  if (typeof details.version !== "number" || details.version <= 0) return undefined;
+  return {
+    id: details.id,
+    kind: details.kind,
+    ...(typeof details.title === "string" && details.title ? { title: details.title } : {}),
+    ...(typeof details.description === "string" && details.description ? { description: details.description } : {}),
+    ...(typeof details.language === "string" && details.language ? { language: details.language } : {}),
+    ...(typeof details.contentType === "string" && details.contentType ? { contentType: details.contentType } : {}),
+    version: details.version,
+    ...(typeof details.bytes === "number" ? { bytes: details.bytes } : {}),
+    ...(typeof details.sha256 === "string" && details.sha256 ? { sha256: details.sha256 } : {}),
+    ...(typeof details.action === "string" && details.action ? { action: details.action } : {}),
+    ...(typeof details.summary === "string" && details.summary ? { summary: details.summary } : {}),
+    ...(typeof details.sourcePath === "string" && details.sourcePath ? { sourcePath: details.sourcePath } : {}),
+  };
+}
+
+function closeOpen(blocks: Block[], except?: Role): Block[] {
+  return blocks.map((block) => (block.open && block.role !== except ? { ...block, open: false } : block));
 }
 
 /** update replaces one block by id, leaving every other reference intact. */
@@ -118,6 +165,15 @@ function lastOpen(blocks: Block[], role: Role): Block | undefined {
   return undefined;
 }
 
+function toolCall(blocks: Block[], id?: string): Block | undefined {
+  if (!id) return lastOpen(blocks, "tool");
+  for (let i = blocks.length - 1; i >= 0; i -= 1) {
+    const block = blocks[i];
+    if (block.role === "tool" && block.callId === id) return block;
+  }
+  return undefined;
+}
+
 export interface FoldResult {
   blocks: Block[];
   /** A turn-level fact the shell shows outside the transcript. */
@@ -129,6 +185,24 @@ export function apply(blocks: Block[], event: AgentEvent): FoldResult {
   switch (event.type) {
     case "message_start":
       return { blocks };
+
+    case "message_end": {
+      let next = closeOpen(blocks);
+      const message = event.message;
+      if (message?.role !== "assistant") return { blocks: next };
+      if (message.stopReason !== "aborted" && (message.stopReason === "error" || message.errorMessage)) {
+        next = [...next, blank("error", {
+          text: modelError(message.errorMessage, message.errorCode),
+          errorCode: message.errorCode,
+        })];
+      }
+      return {
+        blocks: stampLastTurnTiming(next, {
+          endedAt: message.timestamp,
+          durationMs: message.durationMs,
+        }),
+      };
+    }
 
     case "message_update": {
       const inner = event.assistantMessageEvent;
@@ -171,7 +245,7 @@ export function apply(blocks: Block[], event: AgentEvent): FoldResult {
     }
 
     case "tool_execution_start": {
-      const [next] = openBlock(closeOpen(blocks), "tool", {
+      const [next] = openBlock(closeOpen(blocks, "tool"), "tool", {
         name: event.toolName ?? "tool",
         callId: event.toolCallId,
         note: trim(event.args),
@@ -181,35 +255,29 @@ export function apply(blocks: Block[], event: AgentEvent): FoldResult {
     }
 
     case "tool_execution_update": {
-      const open = lastOpen(blocks, "tool");
-      if (!open) return { blocks };
-      return { blocks: update(blocks, open.id, { progress: trim(event.partialResult, 160) }) };
+      const call = toolCall(blocks, event.toolCallId);
+      if (!call?.open) return { blocks };
+      return { blocks: update(blocks, call.id, { progress: trim(event.partialResult, 160) }) };
     }
 
     case "tool_execution_end": {
-      const open = lastOpen(blocks, "tool");
+      const call = toolCall(blocks, event.toolCallId);
       const seconds =
         event.durationMs && event.durationMs > 0 ? `${(event.durationMs / 1000).toFixed(1)}s` : "";
-      const outcome = event.isError ? "failed" : "done";
-      const note = [outcome, seconds].filter(Boolean).join(" · ");
-      if (!open) {
-        const block = blank("tool", {
-          name: event.toolName ?? "tool",
-          note,
-          error: event.isError,
-          result: resultText(event.result),
-        });
-        return { blocks: [...blocks, block] };
-      }
-      return {
-        blocks: update(blocks, open.id, {
-          open: false,
-          progress: undefined,
-          note,
-          error: event.isError,
-          result: resultText(event.result),
-        }),
+      const outcome = event.aborted ? "interrupted" : event.isError ? "failed" : "done";
+      const name = event.toolName ?? call?.name ?? "tool";
+      const patch = {
+        open: false,
+        progress: undefined,
+        note: [outcome, seconds].filter(Boolean).join(" · "),
+        error: event.isError && !event.aborted,
+        result: resultText(event.result),
+        subagent: name === "subagent" ? subagentReceipt(event.result, event.toolCallId) : undefined,
+        artifact: artifactReceipt(event.result, event.isError, event.aborted, name),
       };
+      if (call) return { blocks: update(blocks, call.id, patch) };
+      const block = blank("tool", { ...patch, name, callId: event.toolCallId });
+      return { blocks: [...blocks, block] };
     }
 
     case "compaction_start": {
@@ -222,6 +290,9 @@ export function apply(blocks: Block[], event: AgentEvent): FoldResult {
 
     case "compaction_end": {
       const next = closeOpen(blocks);
+      if (event.willRetry && next.at(-2)?.errorCode === "context_overflow") {
+        next.splice(next.length - 2, 1);
+      }
       const text = event.errorMessage
         ? `压缩失败：${withoutCompactionLabel(event.errorMessage)}`
         : event.aborted
@@ -280,30 +351,174 @@ function withoutCompactionLabel(message: string): string {
   return message;
 }
 
-/** notice appends a shell-level line into the transcript. */export function notice(blocks: Block[], role: "notice" | "error", text: string): Block[] {
+function modelError(detail = "", code = ""): string {
+  const raw = detail.trim();
+  const status = Number(/^([45]\d{2})(?:\s|:|$)/.exec(raw)?.[1] ?? 0);
+  const summary = modelErrorSummary(raw, status, code);
+  return status ? `HTTP ${status} · ${summary}` : summary;
+}
+
+function modelErrorSummary(detail: string, status: number, code: string): string {
+  switch (true) {
+    case code === "context_overflow":
+    case /context[_ ](?:length[_ ]exceeded|overflow)|prompt (?:is )?too long|exceeds the context window/i.test(detail):
+      return "消息超出模型的上下文上限。请缩短消息、移除部分附件，或换用上下文更大的模型。";
+    case status === 402:
+    case /insufficient[_ ](?:quota|credits|balance)|billing[_ ]hard[_ ]limit|quota exhausted|exceeded your current quota/i.test(detail):
+      return "模型服务的额度或余额不足。请检查账户用量和计费设置。";
+    case status === 401:
+    case /authentication_error|invalid[_ ]api[_ ]key|missing api key|unauthenticated/i.test(detail):
+      return "模型服务认证失败。请检查模型设置中的 API Key 是否正确或已过期。";
+    case status === 403:
+    case /permission_denied|permission_error|access_denied/i.test(detail):
+      return "模型服务拒绝访问。请检查 API Key 是否有权限使用当前模型。";
+    case status === 404:
+    case /model_not_found/i.test(detail):
+      return "找不到模型或 API 地址。请检查模型 ID 和服务地址。";
+    case status === 429:
+    case /rate[_ ]limit|too many requests|resource_exhausted|throttl/i.test(detail):
+      return "模型请求达到频率限制。请稍后重试。";
+    case code === "stream_idle_timeout":
+    case /model response stream idle timeout/i.test(detail):
+      return "模型服务已连接，但响应流长时间没有新内容。请重试或切换模型。";
+    case status === 408 || status === 504:
+    case /timed? out|timeout|deadline exceeded|deadline_exceeded/i.test(detail):
+      return "等待模型服务响应超时。请检查网络和代理设置，或稍后重试。";
+    case /no such host|name resolution/i.test(detail):
+      return "无法解析模型服务地址。请检查服务地址、DNS 和代理设置。";
+    case /tls handshake|x509:|certificate verify/i.test(detail):
+      return "无法与模型服务建立安全连接。请检查服务证书和代理设置。";
+    case /connect:|dial tcp|network is unreachable|connection refused|proxyconnect|no route to host/i.test(detail):
+      return "无法连接模型服务。请检查网络、代理和服务地址后重试。";
+    case /unexpected eof|connection reset|without (?:a )?(?:finish[_ ]reason|stop reason|a?\s*terminal event)|no stream chunks/i.test(detail):
+      return "模型回复中途断开或未完整返回。请重试。";
+    case /content_filter|content_policy_violation|safety filter/i.test(detail):
+      return "模型服务拦截了这条请求。请调整消息内容后重试。";
+    case status >= 500:
+    case /overloaded[_ ]error|service unavailable|server_error/i.test(detail):
+      return "模型服务暂时不可用。请稍后重试或切换模型。";
+    case status === 413:
+      return "请求内容过大。请缩短消息或移除部分附件后重试。";
+    case status === 400 || status === 422:
+    case /invalid[_ ]request|invalid_argument/i.test(detail):
+      return "模型服务拒绝了请求格式。请检查模型配置及附件格式是否受支持。";
+    default: {
+      const description = detail.replace(/https?:\/\/[^\s"'<>]+/gi, "[服务地址]").replace(/\s+/g, " ");
+      return description ? `模型调用失败。${trim(description, 240)}` : "模型调用失败。请重试或切换模型。";
+    }
+  }
+}
+
+/** notice appends a shell-level line into the transcript. */
+export function notice(blocks: Block[], role: "notice" | "error", text: string): Block[] {
   return [...blocks, blank(role, { text })];
 }
 
 /**
- * receipt appends what the turn cost under the turn it belongs to.
- *
- * It is a block rather than a status-bar fact because it is about the turn that
- * just ended, not about now: the terminal prints the same line as a note, and a
- * reader scrolling back should find it where the answer is. A turn that spent
- * nothing arrives with no fields at all and leaves no line behind.
+ * finishTurn attaches completion timestamp and wall-clock duration to the last
+ * turn's agent output without appending a visible token receipt block.
  */
-export function receipt(blocks: Block[], fields: string[]): Block[] {
-  return fields.length === 0 ? blocks : [...blocks, blank("receipt", { text: fields.join(" · ") })];
+export function finishTurn(
+  blocks: Block[],
+  timing?: { endedAt?: number; durationMs?: number; tokensPerSec?: number },
+): Block[] {
+  return stampLastTurnTiming(blocks, timing);
+}
+
+function stampLastTurnTiming(
+  blocks: Block[],
+  timing?: { endedAt?: number; durationMs?: number; tokensPerSec?: number },
+): Block[] {
+  let lastUserIdx = -1;
+  for (let i = blocks.length - 1; i >= 0; i -= 1) {
+    if (blocks[i].role === "user") {
+      lastUserIdx = i;
+      break;
+    }
+  }
+  let targetIdx = -1;
+  for (let i = blocks.length - 1; i > lastUserIdx; i -= 1) {
+    const role = blocks[i].role;
+    if (role === "answer" || role === "error") {
+      targetIdx = i;
+      break;
+    }
+    if (targetIdx === -1 && role !== "notice") {
+      targetIdx = i;
+    }
+  }
+  if (targetIdx === -1) return blocks;
+
+  const current = blocks[targetIdx];
+  const endedAt = timing?.endedAt && timing.endedAt > 0 ? timing.endedAt : current.endedAt ?? Date.now();
+  const startedAt = lastUserIdx >= 0 ? blocks[lastUserIdx].startedAt : undefined;
+  const durationMs =
+    timing?.durationMs !== undefined && timing.durationMs >= 0
+      ? timing.durationMs
+      : current.durationMs !== undefined && current.durationMs >= 0
+        ? current.durationMs
+        : startedAt && endedAt >= startedAt
+          ? endedAt - startedAt
+          : undefined;
+  const tokensPerSec =
+    timing?.tokensPerSec !== undefined && timing.tokensPerSec > 0
+      ? timing.tokensPerSec
+      : current.tokensPerSec;
+
+  return blocks.map((block, index) =>
+    index === targetIdx
+      ? {
+          ...block,
+          endedAt,
+          ...(durationMs !== undefined ? { durationMs } : {}),
+          ...(tokensPerSec !== undefined && tokensPerSec > 0 ? { tokensPerSec } : {}),
+        }
+      : block,
+  );
 }
 
 /** prompt appends the reader's own message. */
 export function prompt(blocks: Block[], text: string): Block[] {
-  return [...blocks, blank("user", { text })];
+  return [...blocks, blank("user", { text, startedAt: Date.now() })];
 }
 
 /** settle stops every open block, which is what the end of a turn means. */
 export function settle(blocks: Block[]): Block[] {
   return closeOpen(blocks);
+}
+
+export function interrupt(blocks: Block[]): Block[] {
+  const next = settle(blocks);
+  const last = next.at(-1);
+  if (last?.role === "notice" && last.text === STOPPED_NOTICE) return next;
+  return notice(next, "notice", STOPPED_NOTICE);
+}
+
+export function subagentPending(task: SubagentUpdate): boolean {
+  return task.state === "queued" || task.state === "running" || task.state === "stopping";
+}
+
+export function subagentFailed(task: SubagentUpdate): boolean {
+  return task.state === "failed" || task.state === "lost";
+}
+
+/** Overlay live task snapshots on their parent tool rows, including replayed rows. */
+export function withSubagents(
+  blocks: Block[],
+  tasks?: ReadonlyMap<string, SubagentUpdate>,
+  fallbackTasks?: ReadonlyMap<string, SubagentUpdate>,
+): Block[] {
+  if (!tasks?.size && !fallbackTasks?.size) return blocks;
+  return blocks.map((block) => {
+    if (block.role !== "tool" || !block.callId) return block;
+    const task = tasks?.get(block.callId) ?? fallbackTasks?.get(block.callId);
+    if (!task) return block;
+    const saved = block.subagent;
+    if (saved && (saved.id !== task.id || (!subagentPending(saved) && subagentPending(task)))) {
+      return block;
+    }
+    return { ...block, subagent: { ...saved, ...task } };
+  });
 }
 
 /**
@@ -315,18 +530,34 @@ export function settle(blocks: Block[]): Block[] {
  * each item the local id the renderer keys on.
  */
 export function replay(items: TranscriptBlock[]): Block[] {
-  return items.map((item) => {
+  const tasks = new Map<string, SubagentUpdate>();
+  const blocks: Block[] = [];
+  for (const item of items) {
+    if (item.role !== "tool" && item.subagent?.toolCallId) {
+      tasks.set(item.subagent.toolCallId, item.subagent);
+      continue;
+    }
     const role = (ROLES.has(item.role) ? item.role : "notice") as Role;
-    return blank(role, {
+    let text = item.text ?? "";
+    if (role === "error") text = modelError(text, item.errorCode);
+    if (role === "notice" && text === "interrupted") text = STOPPED_NOTICE;
+    blocks.push(blank(role, {
       name: item.name,
-      text: item.text ?? "",
+      text,
       note: item.note,
       args: item.args,
       result: item.result,
       callId: item.id,
+      subagent: item.subagent,
+      ...(item.artifact ? { artifact: item.artifact } : {}),
       error: role === "error" || (role === "tool" && item.note?.includes("failed") === true),
-    });
-  });
+      startedAt: role === "user" ? item.timestamp : undefined,
+      endedAt: item.timestamp,
+      durationMs: item.durationMs,
+      tokensPerSec: item.tokensPerSec,
+    }));
+  }
+  return withSubagents(blocks, tasks);
 }
 
 const ROLES = new Set<string>(["user", "answer", "thinking", "tool", "notice", "error"]);

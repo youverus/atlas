@@ -16,6 +16,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	posixpath "path"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -25,13 +26,27 @@ import (
 // FileName is the list's name inside the atlas home.
 const FileName = "projects.json"
 
+// LocalDeviceID names the local machine in project records and API calls.
+const LocalDeviceID = "local"
+
+// IsLocalDevice reports whether deviceID refers to the local machine.
+func IsLocalDevice(deviceID string) bool {
+	trimmed := strings.TrimSpace(deviceID)
+	return trimmed == "" || trimmed == LocalDeviceID
+}
+
 // Project is one folder in the list.
 //
-// Added is when it was picked, and it doubles as the order the rail draws:
-// a list the reader builds grows at the end.
+// Name is an optional display label set by the user; when empty, front ends
+// fall back to the directory's basename. DeviceID identifies the remote SSH
+// device when non-empty (empty means local). Added is when it was picked, and
+// it doubles as the order the rail draws: a list the reader builds grows at the
+// end.
 type Project struct {
-	Path  string `json:"path"`
-	Added string `json:"added,omitempty"`
+	Path     string `json:"path"`
+	Name     string `json:"name,omitempty"`
+	DeviceID string `json:"deviceId,omitempty"`
+	Added    string `json:"added,omitempty"`
 }
 
 // file is the on-disk shape. An object rather than a bare array so a later
@@ -68,8 +83,8 @@ func (s *Store) List() []Project {
 	return s.load()
 }
 
-// Has reports whether path is already listed, comparing directories rather
-// than strings so "/x" and "/x/" are the same project.
+// Has reports whether local path is already listed, comparing directories
+// rather than strings so "/x" and "/x/" are the same project.
 func (s *Store) Has(path string) bool {
 	resolved, err := resolve(path)
 	if err != nil {
@@ -78,16 +93,22 @@ func (s *Store) Has(path string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, entry := range s.load() {
-		if sameDir(entry.Path, resolved) {
+		if IsLocalDevice(entry.DeviceID) && sameDir(entry.Path, resolved) {
 			return true
 		}
 	}
 	return false
 }
 
-// Add appends a folder. The path is resolved, the directory has to exist, and
-// a folder already on the list is returned as it stands rather than twice.
+// Add appends a local folder. The path is resolved, the directory has to exist,
+// and a folder already on the list is returned as it stands rather than twice.
 func (s *Store) Add(path string) (Project, error) {
+	return s.AddNamed(path, "")
+}
+
+// AddNamed appends a local folder with an optional display name. If the folder
+// is already listed and name is non-empty, its stored display name is updated.
+func (s *Store) AddNamed(path, name string) (Project, error) {
 	resolved, err := resolve(path)
 	if err != nil {
 		return Project{}, err
@@ -103,15 +124,23 @@ func (s *Store) Add(path string) (Project, error) {
 		return Project{}, fmt.Errorf("project: %s is not a directory", resolved)
 	}
 
+	label := strings.TrimSpace(name)
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	list := s.load()
-	for _, entry := range list {
-		if sameDir(entry.Path, resolved) {
-			return entry, nil
+	for i, entry := range list {
+		if IsLocalDevice(entry.DeviceID) && sameDir(entry.Path, resolved) {
+			if label != "" && entry.Name != label {
+				list[i].Name = label
+				if err := s.save(list); err != nil {
+					return Project{}, err
+				}
+			}
+			return list[i], nil
 		}
 	}
-	added := Project{Path: resolved, Added: time.Now().UTC().Format(time.RFC3339)}
+	added := Project{Path: resolved, Name: label, Added: time.Now().UTC().Format(time.RFC3339)}
 	list = append(list, added)
 	if err := s.save(list); err != nil {
 		return Project{}, err
@@ -119,10 +148,82 @@ func (s *Store) Add(path string) (Project, error) {
 	return added, nil
 }
 
-// Remove drops one folder from the list. The conversations stay where they are:
-// this is a list of shortcuts, not a directory of files this package owns.
+// AddRemote appends a project directory on a remote device without probing the
+// local filesystem. Paths are normalized using POSIX rules; validation and home
+// expansion belong to the remote host.
+func (s *Store) AddRemote(deviceID, remotePath, name string) (Project, error) {
+	dev := strings.TrimSpace(deviceID)
+	if IsLocalDevice(dev) {
+		return Project{}, fmt.Errorf("project: invalid remote device id %q", deviceID)
+	}
+	cleaned, err := CleanRemotePath(remotePath)
+	if err != nil {
+		return Project{}, err
+	}
+	label := strings.TrimSpace(name)
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	list := s.load()
+	for i, entry := range list {
+		if entry.DeviceID == dev && sameRemotePath(entry.Path, cleaned) {
+			if label != "" && entry.Name != label {
+				list[i].Name = label
+				if err := s.save(list); err != nil {
+					return Project{}, err
+				}
+			}
+			return list[i], nil
+		}
+	}
+	added := Project{
+		Path:     cleaned,
+		Name:     label,
+		DeviceID: dev,
+		Added:    time.Now().UTC().Format(time.RFC3339),
+	}
+	list = append(list, added)
+	if err := s.save(list); err != nil {
+		return Project{}, err
+	}
+	return added, nil
+}
+
+// Remove drops one local folder from the list. The conversations stay where
+// they are: this is a list of shortcuts, not a directory of files this package
+// owns.
 func (s *Store) Remove(path string) error {
-	resolved, err := resolve(path)
+	return s.RemoveForDevice("", path)
+}
+
+// RemoveForDevice drops a project scoped by deviceID (empty or "local" for
+// local projects).
+func (s *Store) RemoveForDevice(deviceID, path string) error {
+	dev := strings.TrimSpace(deviceID)
+	if IsLocalDevice(dev) {
+		resolved, err := resolve(path)
+		if err != nil {
+			return err
+		}
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		list := s.load()
+		kept := make([]Project, 0, len(list))
+		removed := false
+		for _, entry := range list {
+			if IsLocalDevice(entry.DeviceID) && sameDir(entry.Path, resolved) {
+				removed = true
+				continue
+			}
+			kept = append(kept, entry)
+		}
+		if !removed {
+			return fmt.Errorf("project: %s is not in the list", resolved)
+		}
+		return s.save(kept)
+	}
+
+	cleaned, err := CleanRemotePath(path)
 	if err != nil {
 		return err
 	}
@@ -132,16 +233,62 @@ func (s *Store) Remove(path string) error {
 	kept := make([]Project, 0, len(list))
 	removed := false
 	for _, entry := range list {
-		if sameDir(entry.Path, resolved) {
+		if entry.DeviceID == dev && sameRemotePath(entry.Path, cleaned) {
 			removed = true
 			continue
 		}
 		kept = append(kept, entry)
 	}
 	if !removed {
-		return fmt.Errorf("project: %s is not in the list", resolved)
+		return fmt.Errorf("project: %s (%s) is not in the list", cleaned, dev)
 	}
 	return s.save(kept)
+}
+
+// RemoveAllForDevice drops every project entry associated with deviceID.
+func (s *Store) RemoveAllForDevice(deviceID string) error {
+	dev := strings.TrimSpace(deviceID)
+	if IsLocalDevice(dev) {
+		return fmt.Errorf("project: refuse bulk removal of local projects")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	list := s.load()
+	kept := make([]Project, 0, len(list))
+	changed := false
+	for _, entry := range list {
+		if entry.DeviceID == dev {
+			changed = true
+			continue
+		}
+		kept = append(kept, entry)
+	}
+	if !changed {
+		return nil
+	}
+	return s.save(kept)
+}
+
+// CleanRemotePath normalizes a POSIX remote project path without inspecting
+// the local filesystem.
+func CleanRemotePath(raw string) (string, error) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return "", fmt.Errorf("project: empty path")
+	}
+	if !strings.HasPrefix(trimmed, "/") && trimmed != "~" && !strings.HasPrefix(trimmed, "~/") {
+		return "", fmt.Errorf("project: remote path %q must be absolute or start with ~/", raw)
+	}
+	return posixpath.Clean(trimmed), nil
+}
+
+func sameRemotePath(a, b string) bool {
+	ca, errA := CleanRemotePath(a)
+	cb, errB := CleanRemotePath(b)
+	if errA != nil || errB != nil {
+		return strings.TrimSpace(a) == strings.TrimSpace(b)
+	}
+	return ca == cb
 }
 
 // load reads the file. Callers hold the lock.

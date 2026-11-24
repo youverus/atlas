@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
 	"strings"
 
 	"pi-go/internal/tool"
@@ -57,13 +56,16 @@ func (t findTool) Execute(ctx context.Context, call tool.Call, onUpdate func(too
 	if request.Path != "" {
 		searchPath = request.Path
 	}
-	root := t.set.resolve(searchPath)
+	root, err := t.set.resolveAccess(searchPath)
+	if err != nil {
+		return tool.Result{}, err
+	}
 	limit := findDefaultLimit
 	if request.Limit != nil {
 		limit = request.Limit.Int()
 	}
 
-	info, err := os.Stat(root)
+	info, err := t.set.stat(root)
 	if err != nil {
 		if isNotExist(err) {
 			return tool.Result{}, fmt.Errorf("Path not found: %s", root)
@@ -78,6 +80,7 @@ func (t findTool) Execute(ctx context.Context, call tool.Call, onUpdate func(too
 	limitReached := false
 	w := &walker{
 		ctx:         ctx,
+		set:         t.set,
 		ignores:     newIgnoreStack(),
 		includeDirs: true,
 		visit: func(entry walkEntry) (bool, error) {

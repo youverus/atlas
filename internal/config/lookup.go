@@ -80,6 +80,26 @@ func (c *Config) Resolve(name string) (Selection, error) {
 	return c.byID(name)
 }
 
+// ResolveSubagent selects a model for the role, falling back to the subagent
+// default. Configured reports whether an explicit selection must be used.
+func (c *Config) ResolveSubagent(role string) (selection Selection, thinking string, configured bool, err error) {
+	if c == nil || c.Subagents == nil {
+		return Selection{}, "", false, nil
+	}
+	model, setting := c.Subagents.Roles[role], "roles."+role
+	if model.Model == "" {
+		model, setting = c.Subagents.Default, "default"
+	}
+	if model.Model == "" {
+		return Selection{}, "", false, nil
+	}
+	selection, err = c.Resolve(model.Model)
+	if err != nil {
+		return Selection{}, "", true, fmt.Errorf("subagents.%s.model: %w", setting, err)
+	}
+	return selection, model.ThinkingLevel, true, nil
+}
+
 // Lookup finds one model by its provider and id. Both names must be exact: a
 // session replay depends on resolving the pair it recorded.
 func (c *Config) Lookup(providerName, modelID string) (Selection, error) {

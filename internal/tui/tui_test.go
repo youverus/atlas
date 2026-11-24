@@ -165,6 +165,108 @@ func TestTranscriptFoldsAnAnswer(t *testing.T) {
 	}
 }
 
+func TestSubagentResultTurnPreservesAndPinsTheSideDraft(t *testing.T) {
+	m := New(Config{
+		Subagents: &SubagentRuntime{
+			Session: func() (string, string) { return "session", "file" },
+			Ready:   func() bool { return true },
+			Run: func(_ context.Context, sink Sink) error {
+				sink.Note("result turn")
+				return context.Canceled
+			},
+		},
+		Interrupt: func() []string {
+			t.Error("an internal turn tried to clear the user queues")
+			return nil
+		},
+	})
+	m.active = ViewSide
+	m.composer().Set("draft")
+	m.SendSubagentUpdate(context.Background(), wire.SubagentUpdate{SessionID: "session", SessionFile: "file", State: "succeeded"})
+	updated, _ := m.Update(next(t, m))
+	m = updated.(Model)
+	if !m.busy || m.turnView != ViewMain || m.active != ViewSide {
+		t.Fatalf("result turn state: busy=%v turnView=%d active=%d", m.busy, m.turnView, m.active)
+	}
+	m.interrupt()
+	for m.busy {
+		updated, _ = m.Update(next(t, m))
+		m = updated.(Model)
+	}
+	if got := m.composer().String(); got != "draft" {
+		t.Fatalf("side draft = %q", got)
+	}
+	if m.view(ViewSide).transcript.Len() != 0 {
+		t.Fatal("the result turn changed the side transcript")
+	}
+	blocks := m.view(ViewMain).transcript.Blocks()
+	if len(blocks) != 2 || blocks[0].Role != RoleNotice || blocks[0].Text != "result turn" || blocks[1].Text != "interrupted" {
+		t.Fatalf("main transcript = %+v", blocks)
+	}
+}
+
+func TestSubagentWakeChecksTheCurrentSessionAfterTheUserTurn(t *testing.T) {
+	file := "previous"
+	pending := map[string]bool{"previous": true}
+	var checked []string
+	m := New(Config{Subagents: &SubagentRuntime{
+		Session: func() (string, string) { return "session", file },
+		Ready: func() bool {
+			checked = append(checked, file)
+			return pending[file]
+		},
+		Run: func(_ context.Context, _ Sink) error { return nil },
+	}})
+	m.busy = true
+	old := subagentMsg{update: wire.SubagentUpdate{ID: "job", SessionID: "session", SessionFile: "previous", State: "succeeded"}}
+	updated, _ := m.Update(old)
+	m = updated.(Model)
+	if len(checked) != 0 || !m.busy {
+		t.Fatal("a background event bypassed the busy turn")
+	}
+	file = "current"
+	updated, _ = m.Update(ResetMsg{View: ViewMain})
+	m = updated.(Model)
+	updated, _ = m.Update(TurnMsg{View: ViewMain})
+	m = updated.(Model)
+	updated, _ = m.Update(next(t, m)) // repaint after the command
+	m = updated.(Model)
+	updated, _ = m.Update(old)
+	m = updated.(Model)
+	if len(checked) != 1 || checked[0] != "current" || m.busy {
+		t.Fatalf("checks after the switch = %v, busy=%v", checked, m.busy)
+	}
+	pending["current"] = true
+	updated, _ = m.Update(subagentMsg{update: wire.SubagentUpdate{ID: "current-job", SessionID: "session", SessionFile: "current", State: "succeeded"}})
+	m = updated.(Model)
+	if !m.busy || !m.internalTurn {
+		t.Fatal("the current session's completion did not start an internal turn")
+	}
+	delete(pending, "current")
+	updated, _ = m.Update(next(t, m))
+	m = updated.(Model)
+	if m.busy {
+		t.Fatal("the internal turn did not release the slot")
+	}
+}
+
+func TestSubagentTranscriptUpdatesOneRowPerTask(t *testing.T) {
+	tr := NewTranscript()
+	tr.Apply(wire.AgentEvent{Type: wire.AgentEventToolExecStart, ToolCallID: "call", ToolName: wire.SubagentToolName})
+	update := wire.SubagentUpdate{ID: "job", ToolCallID: "call", Role: wire.SubagentVerifier, State: "running"}
+	tr.showSubagent(update, false)
+	tr.Apply(wire.AgentEvent{Type: wire.AgentEventToolExecEnd, ToolCallID: "call", ToolName: wire.SubagentToolName})
+	update.State, update.Report = "succeeded", "verified \x1b[31mthe evidence\x1b[0m"
+	tr.Apply(wire.AgentEvent{Type: wire.AgentEventSubagentUpdate, Subagent: &update})
+	update.State = "queued"
+	tr.showSubagent(update, false)
+	tr.showSubagent(wire.SubagentUpdate{ID: "old", ToolCallID: "another-branch", State: "failed"}, false)
+	blocks := tr.Blocks()
+	if len(blocks) != 2 || blocks[1].Role != RoleNotice || !strings.Contains(blocks[1].Text, "succeeded · job\nverified the evidence") {
+		t.Fatalf("transcript = %+v", blocks)
+	}
+}
+
 func TestTranscriptPairsToolCallsByID(t *testing.T) {
 	tr := NewTranscript()
 	failed := true
@@ -487,8 +589,8 @@ func TestComposerInsertsPastedNewlinesAsSpaces(t *testing.T) {
 func TestModelSubmitsAndFoldsEvents(t *testing.T) {
 	var got string
 	done := make(chan struct{})
-	runner := func(ctx context.Context, line string, sink Sink) error {
-		got = line
+	runner := func(ctx context.Context, prompt Prompt, sink Sink) error {
+		got = prompt.Text
 		sink.Event(wire.AgentEvent{Type: wire.AgentEventMessageUpdate, AssistantEvent: &wire.AssistantEvent{
 			Type: wire.EventTextDelta, Delta: "hi there",
 		}})
@@ -536,7 +638,7 @@ func TestModelSubmitsAndFoldsEvents(t *testing.T) {
 
 func TestModelAsksAndAnswers(t *testing.T) {
 	approved := make(chan AskAnswer, 1)
-	runner := func(ctx context.Context, line string, sink Sink) error {
+	runner := func(ctx context.Context, prompt Prompt, sink Sink) error {
 		approved <- sink.Ask(AskRequest{Subject: "Ran  bash  ls", Tool: "bash"})
 		return nil
 	}
@@ -581,7 +683,7 @@ func TestModelAsksAndAnswers(t *testing.T) {
 func TestModelSecondQuestionIsDenied(t *testing.T) {
 	first := make(chan AskAnswer, 1)
 	second := make(chan AskAnswer, 1)
-	runner := func(ctx context.Context, line string, sink Sink) error {
+	runner := func(ctx context.Context, prompt Prompt, sink Sink) error {
 		first <- sink.Ask(AskRequest{Subject: "one", Tool: "bash"})
 		second <- sink.Ask(AskRequest{Subject: "two", Tool: "bash"})
 		return nil
@@ -623,9 +725,9 @@ func running(t *testing.T, cfg Config) Model {
 	t.Helper()
 	blocked := make(chan struct{})
 	run := cfg.Run
-	cfg.Run = func(ctx context.Context, line string, sink Sink) error {
+	cfg.Run = func(ctx context.Context, prompt Prompt, sink Sink) error {
 		if run != nil {
-			return run(ctx, line, sink)
+			return run(ctx, prompt, sink)
 		}
 		close(blocked)
 		<-ctx.Done()
@@ -642,140 +744,61 @@ func running(t *testing.T, cfg Config) Model {
 	return m
 }
 
-func TestTheStopGestureTakesTwoPresses(t *testing.T) {
-	m := running(t, Config{Styles: testStyles(t)})
-
-	// One press is a slip: the turn keeps running and the screen says what the
-	// second press would do.
-	updated, _ := m.Update(press(tea.KeyEscape, 0))
-	m = updated.(Model)
-	if m.cancel == nil || !m.busy {
-		t.Fatal("one press stopped the turn")
-	}
-	if !m.interruptArmed {
-		t.Fatal("the first press did not arm the stop")
-	}
-	if got, want := m.placeholder(), "esc again to interrupt"; got != want {
-		t.Fatalf("placeholder = %q, want %q", got, want)
-	}
-
-	updated, _ = m.Update(press(tea.KeyEscape, 0))
-	m = updated.(Model)
-	if m.cancel != nil {
-		t.Fatal("cancel was not released")
-	}
-	if m.interruptArmed {
-		t.Fatal("the stop stayed armed after it was spent")
-	}
-
-	updated, _ = m.Update(next(t, m))
-	m = updated.(Model)
-	if m.busy {
-		t.Fatal("still busy after the cancellation came back")
-	}
-	blocks := m.views[ViewMain].transcript.Blocks()
-	if last := blocks[len(blocks)-1]; last.Role != RoleNotice || last.Text != "interrupted" {
-		t.Fatalf("last block = %+v, want an interrupted notice", last)
+func TestTheStopGestureCancelsOnOnePress(t *testing.T) {
+	for _, key := range []struct {
+		name string
+		code rune
+		mod  tea.KeyMod
+	}{{"Esc", tea.KeyEscape, 0}, {"Ctrl+C", 'c', tea.ModCtrl}} {
+		t.Run(key.name, func(t *testing.T) {
+			m := running(t, Config{Styles: testStyles(t)})
+			updated, _ := m.Update(typeText("keep this draft"))
+			m = updated.(Model)
+			updated, _ = m.Update(press(key.code, key.mod))
+			m = updated.(Model)
+			if m.cancel != nil || !m.busy || m.placeholder() != "stopping…" {
+				t.Fatal("one press did not request cancellation")
+			}
+			updated, _ = m.Update(next(t, m))
+			m = updated.(Model)
+			if m.busy || m.composer().String() != "keep this draft" {
+				t.Fatal("the stopped turn remained busy or lost the draft")
+			}
+			blocks := m.views[ViewMain].transcript.Blocks()
+			if last := blocks[len(blocks)-1]; last.Role != RoleNotice || last.Text != "interrupted" {
+				t.Fatalf("last block = %+v, want an interrupted notice", last)
+			}
+		})
 	}
 }
 
-func TestTheStopGestureIsDisarmedByAnotherKey(t *testing.T) {
-	m := running(t, Config{Styles: testStyles(t), Suggest: palette})
-	updated, _ := m.Update(press(tea.KeyEscape, 0))
-	m = updated.(Model)
-
-	updated, _ = m.Update(typeText("/m"))
-	m = updated.(Model)
-	if m.interruptArmed {
-		t.Fatal("typing left the stop armed")
-	}
-
-	// The turn is still there, and so is what was typed: a key that is not a
-	// stop key is the reader saying they are still working.
-	updated, _ = m.Update(press(tea.KeyEscape, 0))
-	m = updated.(Model)
-	if m.cancel == nil || !m.busy {
-		t.Fatal("a disarm-then-press sequence stopped the turn")
-	}
-	if got := m.composer().String(); got != "/m" {
-		t.Fatalf("composer = %q, want the draft untouched", got)
-	}
-}
-
-func TestTheStopGestureIsSharedBetweenEscAndCtrlC(t *testing.T) {
-	// What is counted is the reader stopping twice, not one key twice: a reader
-	// who reaches for one and then the other is not making two mistakes.
+func TestApprovalKeysDistinguishRejectFromStop(t *testing.T) {
 	m := running(t, Config{Styles: testStyles(t)})
-
-	updated, _ := m.Update(press(tea.KeyEscape, 0))
-	m = updated.(Model)
-	updated, _ = m.Update(press('c', tea.ModCtrl))
-	m = updated.(Model)
-	if m.cancel != nil {
-		t.Fatal("esc then ctrl+c left the turn running")
-	}
-}
-
-// TestTheQuestionOutranksTheStopGesture pins which of the two meanings Esc has
-// when a question is on screen: the box owns the keys the turn is blocked on, so
-// one press answers "no" and the turn keeps going. Whoever wants it to stop
-// presses twice more, and the hint that advertises that is out of the way while
-// the box is up.
-func TestTheQuestionOutranksTheStopGesture(t *testing.T) {
-	m := running(t, Config{Styles: testStyles(t)})
-
-	// The arm is already set when the question arrives: that is the sequence
-	// where a stale one would hurt most, because the Esc that answers the box
-	// would otherwise also be the second half of the stop.
-	updated, _ := m.Update(press(tea.KeyEscape, 0))
-	m = updated.(Model)
-	if !m.interruptArmed {
-		t.Fatal("the first press did not arm the stop")
-	}
-
 	question := make(chan AskAnswer, 1)
-	updated, _ = m.Update(AskMsg{Request: AskRequest{Subject: "write?", Tool: "write"}, Reply: question})
+	request := AskMsg{Request: AskRequest{Subject: "write?", Tool: "write"}, Reply: question}
+	updated, _ := m.Update(request)
 	m = updated.(Model)
-	if got := m.placeholder(); got != "" {
-		t.Fatalf("placeholder under the question = %q, want none", got)
-	}
-
 	updated, _ = m.Update(press(tea.KeyEscape, 0))
 	m = updated.(Model)
-	if m.approval != nil {
-		t.Fatal("Esc left the question on screen")
+	if m.approval != nil || m.cancel == nil {
+		t.Fatal("Esc did not dismiss only the approval")
 	}
 	select {
 	case got := <-question:
 		if got.Allowed {
-			t.Fatalf("Esc approved the call: %+v", got)
+			t.Fatal("Esc approved the tool")
 		}
 	default:
-		t.Fatal("Esc did not answer the question")
+		t.Fatal("Esc left the approval waiter blocked")
 	}
-	if m.cancel == nil || !m.busy {
-		t.Fatal("answering the question stopped the turn")
-	}
-	if m.interruptArmed {
-		t.Fatal("the key the question took was also counted as the first stop")
-	}
-	if got := m.placeholder(); got != "esc twice to interrupt" {
-		t.Fatalf("placeholder = %q, want the unarmed hint", got)
-	}
-}
-
-func TestAFinishedTurnLeavesTheStopGestureDisarmed(t *testing.T) {
-	// A turn that ends by itself must not leave the second press of a gesture
-	// that started against it aimed at the next one.
-	m := running(t, Config{Styles: testStyles(t)})
-	updated, _ := m.Update(press(tea.KeyEscape, 0))
+	updated, _ = m.Update(request)
 	m = updated.(Model)
-
-	updated, _ = m.Update(TurnMsg{View: ViewMain})
+	updated, _ = m.Update(press('c', tea.ModCtrl))
 	m = updated.(Model)
-	if m.busy || m.interruptArmed {
-		t.Fatalf("busy=%v armed=%v after the turn ended by itself", m.busy, m.interruptArmed)
+	if m.approval != nil || m.cancel != nil {
+		t.Fatal("Ctrl+C did not stop the whole turn and dismiss approval")
 	}
+	next(t, m)
 }
 
 func TestInterruptGivesBackEverythingTheTurnHeld(t *testing.T) {
@@ -928,7 +951,7 @@ func TestModelDoesNotSwitchViewsWithoutAHost(t *testing.T) {
 
 func TestModelRefusesToSwitchDuringATurn(t *testing.T) {
 	release := make(chan struct{})
-	runner := func(ctx context.Context, line string, sink Sink) error {
+	runner := func(ctx context.Context, prompt Prompt, sink Sink) error {
 		<-release
 		return nil
 	}
@@ -953,7 +976,7 @@ func TestModelRefusesToSwitchDuringATurn(t *testing.T) {
 }
 
 func TestModelNotesOutputFromTheHost(t *testing.T) {
-	runner := func(ctx context.Context, line string, sink Sink) error {
+	runner := func(ctx context.Context, prompt Prompt, sink Sink) error {
 		sink.Note("model: mock/one")
 		sink.Note("compacted 100 tokens into 20")
 		return nil
@@ -986,7 +1009,7 @@ func TestModelReplaysAnAnswerAsOneBlock(t *testing.T) {
 	// A resumed conversation arrives as answers, not as notes: the bar has to
 	// run down the whole block, and only the transcript can draw that once it
 	// has the text as a block instead of as one line at a time.
-	runner := func(ctx context.Context, line string, sink Sink) error {
+	runner := func(ctx context.Context, prompt Prompt, sink Sink) error {
 		sink.Answer("first line of the answer\nsecond line of it")
 		return nil
 	}
@@ -1024,7 +1047,7 @@ func TestModelAsksForOneFullRepaintPerBurstOfNotes(t *testing.T) {
 	// is where that goes wrong. One repaint request per burst is the price of
 	// trusting the screen at the end of it, and it has to travel through the
 	// same reader as everything else: a second read would be a second reader.
-	runner := func(ctx context.Context, line string, sink Sink) error {
+	runner := func(ctx context.Context, prompt Prompt, sink Sink) error {
 		sink.Note("first")
 		sink.Note("second")
 		return nil
@@ -1073,7 +1096,7 @@ func TestModelAsksForAFullRepaintWhenTheModalCloses(t *testing.T) {
 	// Answering a question removes a box that covered part of the transcript.
 	// The rows underneath are not the rows that were drawn there — the box had
 	// its own — so the incremental painter needs to be told to repaint.
-	runner := func(ctx context.Context, line string, sink Sink) error {
+	runner := func(ctx context.Context, prompt Prompt, sink Sink) error {
 		sink.Ask(AskRequest{Subject: "Ran  bash  ls", Tool: "bash"})
 		return nil
 	}
@@ -1142,7 +1165,7 @@ func TestCtrlCStepsOutOfTheSideConversation(t *testing.T) {
 func TestCtrlCOnlyInterruptsWhileATurnRuns(t *testing.T) {
 	release := make(chan struct{})
 	stepped := false
-	runner := func(ctx context.Context, line string, sink Sink) error {
+	runner := func(ctx context.Context, prompt Prompt, sink Sink) error {
 		<-release
 		return nil
 	}
@@ -1300,7 +1323,7 @@ func TestTheHomePageDrawsTheWordmarkInBlocks(t *testing.T) {
 // rather than a transcript block that would push the page away.
 func TestTheHomePageCanSayWhatJustHappened(t *testing.T) {
 	info := &Welcome{Version: "9.9.9", Dir: "~/proj/atlas", Model: "fake/one", Note: "think high"}
-	runner := func(context.Context, string, Sink) error { return nil }
+	runner := func(context.Context, Prompt, Sink) error { return nil }
 	m := sized(t, New(Config{Styles: testStyles(t), Welcome: home(info), Run: runner}))
 
 	updated, _ := m.Update(FlashMsg{Text: "archived: session 01a17b1f · /recover opens it again"})
@@ -1500,8 +1523,8 @@ func TestPaletteTakesTheArrowsAndTabFillsTheName(t *testing.T) {
 
 func TestEnterCompletesAnUnfinishedCommand(t *testing.T) {
 	lines := make(chan string, 1)
-	runner := func(ctx context.Context, line string, sink Sink) error {
-		lines <- line
+	runner := func(ctx context.Context, prompt Prompt, sink Sink) error {
+		lines <- prompt.Text
 		return nil
 	}
 	m := sized(t, New(Config{Styles: testStyles(t), Suggest: palette, Run: runner}))
@@ -1524,8 +1547,8 @@ func TestEnterCompletesAnUnfinishedCommand(t *testing.T) {
 // without its argument.
 func TestEnterKeepsTheArgumentItWasGiven(t *testing.T) {
 	lines := make(chan string, 2)
-	runner := func(ctx context.Context, line string, sink Sink) error {
-		lines <- line
+	runner := func(ctx context.Context, prompt Prompt, sink Sink) error {
+		lines <- prompt.Text
 		return nil
 	}
 	m := sized(t, New(Config{Styles: testStyles(t), Suggest: palette, Run: runner}))
@@ -1621,7 +1644,7 @@ func TestPickDrawsTheRowsAndTakesTheHighlightedOne(t *testing.T) {
 		t.Fatalf("frame has %d lines, want %d", lines, m.height)
 	}
 	// The composer takes no keys while the box is up, so it stops advertising
-	// one: "esc twice to interrupt" beside a footer that says "Esc leaves"
+	// one: "esc to interrupt" beside a footer that says "Esc leaves"
 	// would read as two different meanings for the same key.
 	if hint := m.placeholder(); hint != "" {
 		t.Fatalf("placeholder while the list is up = %q, want none", hint)
@@ -1913,7 +1936,7 @@ func TestSecondPickIsRefusedWhileTheFirstIsUp(t *testing.T) {
 
 func TestSinkPickBlocksUntilTheRowIsTaken(t *testing.T) {
 	answers := make(chan PickAnswer, 1)
-	runner := func(ctx context.Context, line string, sink Sink) error {
+	runner := func(ctx context.Context, prompt Prompt, sink Sink) error {
 		answers <- sink.Pick(PickRequest{Title: "model", Items: []Choice{{Value: "a", Label: "alpha"}}})
 		return nil
 	}
@@ -1943,7 +1966,7 @@ func TestSinkPickBlocksUntilTheRowIsTaken(t *testing.T) {
 }
 
 func TestModelReportsARefusedTurn(t *testing.T) {
-	runner := func(ctx context.Context, line string, sink Sink) error {
+	runner := func(ctx context.Context, prompt Prompt, sink Sink) error {
 		return errors.New("the kernel is busy")
 	}
 	m := sized(t, New(Config{Styles: testStyles(t), Run: runner}))
@@ -1985,7 +2008,7 @@ func TestModelSubmittingKeepsTheOneReader(t *testing.T) {
 	// two readers deliver messages in whatever order their goroutines wake: a
 	// view switch overtaking the note that belongs to it, an answer split in
 	// two.
-	runner := func(ctx context.Context, line string, sink Sink) error { return nil }
+	runner := func(ctx context.Context, prompt Prompt, sink Sink) error { return nil }
 	m := sized(t, New(Config{Styles: testStyles(t), Run: runner}))
 	if !m.host.armed {
 		t.Fatal("the idle model is not listening")
@@ -2012,7 +2035,7 @@ func TestModelSubmittingKeepsTheOneReader(t *testing.T) {
 func TestModelKeepsOneListenerDuringATurn(t *testing.T) {
 	started := make(chan struct{})
 	release := make(chan struct{})
-	runner := func(ctx context.Context, line string, sink Sink) error {
+	runner := func(ctx context.Context, prompt Prompt, sink Sink) error {
 		close(started)
 		<-release
 		return nil
@@ -2419,8 +2442,8 @@ func TestTabFillsAFileReferenceInPlace(t *testing.T) {
 // left to fill.
 func TestEnterFillsAReferenceWithoutSendingIt(t *testing.T) {
 	sent := make(chan string, 2)
-	runner := func(ctx context.Context, line string, sink Sink) error {
-		sent <- line
+	runner := func(ctx context.Context, prompt Prompt, sink Sink) error {
+		sent <- prompt.Text
 		return nil
 	}
 	m := sized(t, New(Config{Styles: testStyles(t), Attach: files, Run: runner}))
@@ -2446,6 +2469,57 @@ func TestEnterFillsAReferenceWithoutSendingIt(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("the second Enter never sent")
+	}
+}
+
+func TestImagePicksFollowComposerEdits(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		pick bool
+		edit func(*Composer)
+		want bool
+	}{
+		{name: "typed path", want: false},
+		{name: "exact tab pick", pick: true, want: true},
+		{name: "edit around path", pick: true, want: true, edit: func(c *Composer) {
+			c.Home()
+			c.Insert("说明 ")
+			c.End()
+			c.Insert(" please")
+		}},
+		{name: "edit inside path", pick: true, want: false, edit: func(c *Composer) {
+			c.Left()
+			c.Backspace()
+		}},
+		{name: "replace picked text", pick: true, want: false, edit: func(c *Composer) {
+			c.Set(c.String())
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := sized(t, New(Config{
+				Styles: testStyles(t),
+				Attach: func(line string) []Suggestion {
+					if strings.HasSuffix(line, "@shot.png") {
+						return []Suggestion{{Name: "@shot.png", Replace: len("@shot.png"), Path: "/tmp/shot.png"}}
+					}
+					return nil
+				},
+				IsImage: func(path string) bool { return path == "/tmp/shot.png" },
+			}))
+			updated, _ := m.Update(typeText("see @shot.png"))
+			m = updated.(Model)
+			if tc.pick {
+				updated, _ = m.Update(press(tea.KeyTab, 0))
+				m = updated.(Model)
+			}
+			if tc.edit != nil {
+				tc.edit(m.composer())
+			}
+			prompt, ok := m.composer().Take()
+			if !ok || (len(prompt.Images) == 1) != tc.want {
+				t.Fatalf("prompt = %+v, want attachment %v", prompt, tc.want)
+			}
+		})
 	}
 }
 

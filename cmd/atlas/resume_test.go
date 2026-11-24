@@ -502,7 +502,7 @@ func TestBareResumeOpensAMenu(t *testing.T) {
 		asked = req
 		return tui.PickAnswer{Value: target.File(), Taken: true}
 	}
-	done, err := replCommand(context.Background(), application, nil, "/resume", models{}, picker, pick, emptyPrompts(), out, newRenderer(out, out, false), mcpState{}, nil, nil)
+	done, err := replCommand(context.Background(), application, nil, "/resume", models{}, picker, pick, emptyPrompts(), out, newRenderer(out, out, false), mcpState{}, nil)
 	if done || err != nil {
 		t.Fatalf("replCommand = (%v, %v), want the resume", done, err)
 	}
@@ -547,7 +547,7 @@ func TestBareResumeOpensAMenu(t *testing.T) {
 		opened = req.Current
 		return tui.PickAnswer{}
 	}
-	if _, err := replCommand(context.Background(), application, nil, "/resume", models{}, picker, again, emptyPrompts(), out, newRenderer(out, out, false), mcpState{}, nil, nil); err != nil {
+	if _, err := replCommand(context.Background(), application, nil, "/resume", models{}, picker, again, emptyPrompts(), out, newRenderer(out, out, false), mcpState{}, nil); err != nil {
 		t.Fatalf("replCommand: %v", err)
 	}
 	if opened != target.File() {
@@ -562,7 +562,7 @@ func TestClosingTheResumeMenuChangesNothing(t *testing.T) {
 	out := &strings.Builder{}
 	pick := func(tui.PickRequest) tui.PickAnswer { return tui.PickAnswer{} }
 
-	if _, err := replCommand(context.Background(), application, nil, "/resume", models{}, picker, pick, emptyPrompts(), out, newRenderer(out, out, false), mcpState{}, nil, nil); err != nil {
+	if _, err := replCommand(context.Background(), application, nil, "/resume", models{}, picker, pick, emptyPrompts(), out, newRenderer(out, out, false), mcpState{}, nil); err != nil {
 		t.Fatalf("replCommand: %v", err)
 	}
 	if out.Len() != 0 {

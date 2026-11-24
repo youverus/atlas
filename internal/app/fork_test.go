@@ -186,41 +186,50 @@ func TestForkSessionStaysInMemory(t *testing.T) {
 	}
 }
 
-func TestForkMessagesListsUserTextEntriesInOrder(t *testing.T) {
+func TestForkPointsListAnswersOnePerTurn(t *testing.T) {
 	manager := newSession(t)
 	application := newTestApp(t, manager, faux.New(
 		faux.Response{Text: "first reply"},
 		faux.Response{Text: "second reply"},
 	))
 
-	if got := application.ForkMessages(); len(got) != 0 {
-		t.Fatalf("empty fork messages = %+v, want empty", got)
+	if got := application.ForkPoints(); len(got) != 0 {
+		t.Fatalf("empty fork points = %+v, want empty", got)
 	}
 
-	// Image-only user message has no text, so get_fork_messages skips it.
+	// An image-only prompt opens a turn but has no text of its own; the answer
+	// that closes it is still a point.
 	mustAppend(t, manager, wire.UserMessageBlocks(wire.ImageContent("AAAA", "image/png")))
-	u1 := mustAppend(t, manager, wire.UserMessage("first prompt"))
+	a0 := mustAppend(t, manager, wire.AssistantMessage(wire.TextContent("reply to the image")))
+	mustAppend(t, manager, wire.UserMessage("first prompt"))
 	mustAppend(t, manager, wire.AssistantMessage(wire.TextContent("first reply")))
-	u2 := mustAppend(t, manager, wire.UserMessageBlocks(
-		wire.TextContent("second "),
-		wire.TextContent("prompt"),
-		wire.ImageContent("BBBB", "image/png"),
+	mustAppend(t, manager, wire.UserMessage("second prompt"))
+	// An assistant message that still holds a tool call cannot end a turn: the
+	// branch would carry a call with no result.
+	mustAppend(t, manager, wire.AssistantMessage(
+		wire.TextContent("let me look"),
+		wire.ToolCallContent("call-1", "read", []byte(`{"path":"a.go"}`)),
 	))
-	mustAppend(t, manager, wire.AssistantMessage(wire.TextContent("second reply")))
+	a2 := mustAppend(t, manager, wire.AssistantMessage(wire.TextContent("second reply")))
 
-	got := application.ForkMessages()
-	if len(got) != 2 {
-		t.Fatalf("fork messages = %+v, want 2", got)
+	got := application.ForkPoints()
+	if len(got) != 3 {
+		t.Fatalf("fork points = %+v, want 3", got)
 	}
-	if got[0].EntryID != u1 || got[0].Text != "first prompt" {
-		t.Fatalf("first = %+v, want %q / %q", got[0], u1, "first prompt")
+	if got[0].EntryID != a0 || got[0].Turn != 1 || got[0].Text != "reply to the image" {
+		t.Fatalf("first = %+v, want turn 1 / %q", got[0], "reply to the image")
 	}
-	if got[1].EntryID != u2 || got[1].Text != "second prompt" {
-		t.Fatalf("second = %+v, want %q / %q", got[1], u2, "second prompt")
+	if got[1].Turn != 2 || got[1].Text != "first reply" {
+		t.Fatalf("second = %+v, want turn 2 / %q", got[1], "first reply")
+	}
+	// The tool-calling message is skipped, so the closing answer replaces it
+	// rather than adding a second point to the same turn.
+	if got[2].EntryID != a2 || got[2].Turn != 3 || got[2].Text != "second reply" {
+		t.Fatalf("third = %+v, want turn 3 / %q", got[2], "second reply")
 	}
 }
 
-func TestForkAtFirstUserMessageStartsEmptySessionWithParent(t *testing.T) {
+func TestForkAtFirstAnswerKeepsTheTurn(t *testing.T) {
 	manager := newSession(t)
 	application := newTestApp(t, manager, faux.New(faux.Response{Text: "answer"}))
 	if _, err := application.Ask(context.Background(), wire.UserMessage("only prompt"), nil); err != nil {
@@ -233,13 +242,12 @@ func TestForkAtFirstUserMessageStartsEmptySessionWithParent(t *testing.T) {
 		t.Fatalf("read original: %v", err)
 	}
 
-	firstUser := application.ForkMessages()[0].EntryID
-	text, err := application.ForkAt(firstUser)
-	if err != nil {
-		t.Fatalf("fork at first: %v", err)
+	points := application.ForkPoints()
+	if len(points) != 1 {
+		t.Fatalf("fork points = %+v, want 1", points)
 	}
-	if text != "only prompt" {
-		t.Fatalf("selected text = %q, want %q", text, "only prompt")
+	if err := application.ForkAt(points[0].EntryID); err != nil {
+		t.Fatalf("fork at the first answer: %v", err)
 	}
 	if manager.ID() == oldID {
 		t.Fatal("fork reused session id")
@@ -247,11 +255,10 @@ func TestForkAtFirstUserMessageStartsEmptySessionWithParent(t *testing.T) {
 	if manager.Header().ParentSession != oldFile {
 		t.Fatalf("parentSession = %q, want %q", manager.Header().ParentSession, oldFile)
 	}
-	if application.MessageCount() != 0 {
-		t.Fatalf("messages = %d, want 0", application.MessageCount())
-	}
-	if _, statErr := os.Stat(manager.File()); !os.IsNotExist(statErr) {
-		t.Fatalf("forked empty file exists before first message: %v", statErr)
+	// The branch is taken after the answer, so both halves of the turn survive.
+	messages := application.Messages()
+	if len(messages) != 2 || messages[0].Text() != "only prompt" || messages[1].Text() != "answer" {
+		t.Fatalf("messages = %+v, want [only prompt answer]", messages)
 	}
 	after, err := os.ReadFile(oldFile)
 	if err != nil {
@@ -262,7 +269,7 @@ func TestForkAtFirstUserMessageStartsEmptySessionWithParent(t *testing.T) {
 	}
 }
 
-func TestForkAtMiddleRestoresHistoryModelAndThinking(t *testing.T) {
+func TestForkAtAnswerRestoresHistoryModelAndThinking(t *testing.T) {
 	prov := faux.New(
 		faux.Response{Text: "a1"},
 		faux.Response{Text: "a2"},
@@ -284,8 +291,8 @@ func TestForkAtMiddleRestoresHistoryModelAndThinking(t *testing.T) {
 	if _, err := application.Ask(context.Background(), wire.UserMessage("q2"), nil); err != nil {
 		t.Fatalf("ask 2: %v", err)
 	}
-	// Advance model and thinking after q2; forking at q2 must restore what was
-	// active when q2 was sent (other/m-2, high), not what followed it.
+	// Advance model and thinking after a2; forking at a2 must restore what was
+	// active when it was produced (other/m-2, high), not what followed it.
 	if _, err := application.SetModel("third", "m-3"); err != nil {
 		t.Fatalf("set model 3: %v", err)
 	}
@@ -297,24 +304,20 @@ func TestForkAtMiddleRestoresHistoryModelAndThinking(t *testing.T) {
 		t.Fatalf("begin side: %v", err)
 	}
 
-	forkMsgs := application.ForkMessages()
-	if len(forkMsgs) != 2 {
-		t.Fatalf("fork messages = %+v, want 2", forkMsgs)
+	points := application.ForkPoints()
+	if len(points) != 2 {
+		t.Fatalf("fork points = %+v, want 2", points)
 	}
 	oldFile := manager.File()
-	text, err := application.ForkAt(forkMsgs[1].EntryID)
-	if err != nil {
-		t.Fatalf("fork at q2: %v", err)
-	}
-	if text != "q2" {
-		t.Fatalf("text = %q, want q2", text)
+	if err := application.ForkAt(points[1].EntryID); err != nil {
+		t.Fatalf("fork at the second answer: %v", err)
 	}
 	if manager.Header().ParentSession != oldFile {
 		t.Fatalf("parentSession = %q, want %q", manager.Header().ParentSession, oldFile)
 	}
 	messages := application.Messages()
-	if len(messages) != 2 || messages[0].Text() != "q1" || messages[1].Text() != "a1" {
-		t.Fatalf("messages = %+v, want [q1 a1]", messages)
+	if len(messages) != 4 || messages[2].Text() != "q2" || messages[3].Text() != "a2" {
+		t.Fatalf("messages = %+v, want [q1 a1 q2 a2]", messages)
 	}
 	if got := application.Model(); got.Provider != "other" || got.ID != "m-2" {
 		t.Fatalf("model = %+v, want other/m-2", got)
@@ -337,13 +340,12 @@ func TestForkAtRejectsInvalidEntriesAndBusy(t *testing.T) {
 		t.Fatalf("ask: %v", err)
 	}
 
-	if _, err := application.ForkAt("missing"); !errors.Is(err, ErrInvalidForkEntry) {
+	if err := application.ForkAt("missing"); !errors.Is(err, ErrInvalidForkEntry) {
 		t.Fatalf("missing entry err = %v, want ErrInvalidForkEntry", err)
 	}
-	// The session named itself before the prompt, so the answer is not at a
-	// fixed index: it is found by role, which is what "not a user message"
-	// means here.
-	assistantID := ""
+	// A prompt is not a point: a branch is taken after an answer, so the user
+	// message that opened the turn is rejected the way an answer used to be.
+	userID := ""
 	for _, entry := range manager.Entries() {
 		if entry.Type != session.TypeMessage {
 			continue
@@ -351,15 +353,32 @@ func TestForkAtRejectsInvalidEntriesAndBusy(t *testing.T) {
 		var probe struct {
 			Role wire.Role `json:"role"`
 		}
-		if err := json.Unmarshal(entry.Message, &probe); err == nil && probe.Role == wire.RoleAssistant {
-			assistantID = entry.ID
+		if err := json.Unmarshal(entry.Message, &probe); err == nil && probe.Role == wire.RoleUser {
+			userID = entry.ID
 		}
 	}
-	if assistantID == "" {
-		t.Fatal("the session has no assistant entry to reject")
+	if userID == "" {
+		t.Fatal("the session has no user entry to reject")
 	}
-	if _, err := application.ForkAt(assistantID); !errors.Is(err, ErrInvalidForkEntry) {
-		t.Fatalf("assistant entry err = %v, want ErrInvalidForkEntry", err)
+	if err := application.ForkAt(userID); !errors.Is(err, ErrInvalidForkEntry) {
+		t.Fatalf("user entry err = %v, want ErrInvalidForkEntry", err)
+	}
+
+	// A state entry is not a message either.
+	if err := application.SetThinkingLevel("high"); err != nil {
+		t.Fatalf("set thinking: %v", err)
+	}
+	stateID := ""
+	for _, entry := range manager.Entries() {
+		if entry.Type != session.TypeMessage {
+			stateID = entry.ID
+		}
+	}
+	if stateID == "" {
+		t.Fatal("the session has no state entry to reject")
+	}
+	if err := application.ForkAt(stateID); !errors.Is(err, ErrInvalidForkEntry) {
+		t.Fatalf("state entry err = %v, want ErrInvalidForkEntry", err)
 	}
 
 	prov := newGateProvider()
@@ -370,7 +389,7 @@ func TestForkAtRejectsInvalidEntriesAndBusy(t *testing.T) {
 		done <- err
 	}()
 	<-prov.started
-	if _, err := busyApp.ForkAt("any"); !errors.Is(err, ErrBusy) {
+	if err := busyApp.ForkAt("any"); !errors.Is(err, ErrBusy) {
 		t.Fatalf("busy err = %v, want ErrBusy", err)
 	}
 	close(prov.release)

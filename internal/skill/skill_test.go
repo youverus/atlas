@@ -91,6 +91,21 @@ func TestTheEarlierRootKeepsTheName(t *testing.T) {
 	}
 }
 
+func TestRepeatedRootsAreScannedOnce(t *testing.T) {
+	root := t.TempDir()
+	invalid := filepath.Join(root, "invalid.md")
+	write(t, invalid, "No frontmatter.\n")
+	write(t, filepath.Join(root, "release", "SKILL.md"), document("release", ">-\n  Cut a release.\n  Publish the artifacts."))
+
+	found, notes := Load([]Root{{Dir: root, Scope: Shared}, {Dir: root, Scope: ProjectShared}}, readLimits)
+	if len(found) != 1 || found[0].Scope != Shared || found[0].Description != "Cut a release. Publish the artifacts." {
+		t.Fatalf("found = %+v, want the release skill in the shared scope", found)
+	}
+	if len(notes) != 1 || !strings.Contains(notes[0], invalid) {
+		t.Fatalf("notes = %v, want one about %s", notes, invalid)
+	}
+}
+
 // A root that does not exist is not a finding. A fresh install has none of them,
 // and a warning nobody can act on is a warning that teaches the reader to skim.
 func TestAMissingRootIsSilent(t *testing.T) {

@@ -251,7 +251,7 @@ func TestBareModelListsWhenThereIsNoMenu(t *testing.T) {
 		return err
 	}}
 
-	if _, err := replCommand(context.Background(), application, nil, "/model", model, nil, nil, emptyPrompts(), out, nil, mcpState{}, nil, nil); err != nil {
+	if _, err := replCommand(context.Background(), application, nil, "/model", model, nil, nil, emptyPrompts(), out, nil, mcpState{}, nil); err != nil {
 		t.Fatalf("replCommand: %v", err)
 	}
 	if !listed {
@@ -301,7 +301,7 @@ func TestBareModelOpensAMenu(t *testing.T) {
 		return tui.PickAnswer{Value: "test/r1", Taken: true}
 	}
 
-	if _, err := replCommand(context.Background(), application, nil, "/model", menuModels(t, cfg, application), nil, pick, emptyPrompts(), out, nil, mcpState{}, nil, nil); err != nil {
+	if _, err := replCommand(context.Background(), application, nil, "/model", menuModels(t, cfg, application), nil, pick, emptyPrompts(), out, nil, mcpState{}, nil); err != nil {
 		t.Fatalf("replCommand: %v", err)
 	}
 	if asked.Title != "model" {
@@ -372,7 +372,7 @@ func TestModelMenuTurningTheAxisSwitchesTheLevel(t *testing.T) {
 		return tui.PickAnswer{}
 	}
 
-	if _, err := replCommand(context.Background(), application, nil, "/model", menuModels(t, cfg, application), nil, pick, emptyPrompts(), out, nil, mcpState{}, nil, nil); err != nil {
+	if _, err := replCommand(context.Background(), application, nil, "/model", menuModels(t, cfg, application), nil, pick, emptyPrompts(), out, nil, mcpState{}, nil); err != nil {
 		t.Fatalf("replCommand: %v", err)
 	}
 	// The row advertises the subset this model declares, in the order of the
@@ -403,7 +403,7 @@ func TestModelMenuWithoutAnAxisSwitchesTheModelAlone(t *testing.T) {
 		return tui.PickAnswer{Value: "test/m1", Taken: true}
 	}
 
-	if _, err := replCommand(context.Background(), application, nil, "/model", menuModels(t, cfg, application), nil, pick, emptyPrompts(), out, nil, mcpState{}, nil, nil); err != nil {
+	if _, err := replCommand(context.Background(), application, nil, "/model", menuModels(t, cfg, application), nil, pick, emptyPrompts(), out, nil, mcpState{}, nil); err != nil {
 		t.Fatalf("replCommand: %v", err)
 	}
 	if got := out.String(); !strings.Contains(got, "model: M1\n") {
@@ -425,7 +425,7 @@ func TestModelMenuOpensTheAxisAtTheLevelInEffect(t *testing.T) {
 		return tui.PickAnswer{}
 	}
 
-	if _, err := replCommand(context.Background(), application, nil, "/model", menuModels(t, cfg, application), nil, pick, emptyPrompts(), &strings.Builder{}, nil, mcpState{}, nil, nil); err != nil {
+	if _, err := replCommand(context.Background(), application, nil, "/model", menuModels(t, cfg, application), nil, pick, emptyPrompts(), &strings.Builder{}, nil, mcpState{}, nil); err != nil {
 		t.Fatalf("replCommand: %v", err)
 	}
 	for _, item := range asked.Items {
@@ -446,7 +446,7 @@ func TestClosingTheModelMenuChangesNothing(t *testing.T) {
 	out := &strings.Builder{}
 	pick := func(tui.PickRequest) tui.PickAnswer { return tui.PickAnswer{} }
 
-	if _, err := replCommand(context.Background(), application, nil, "/model", menuModels(t, cfg, application), nil, pick, emptyPrompts(), out, nil, mcpState{}, nil, nil); err != nil {
+	if _, err := replCommand(context.Background(), application, nil, "/model", menuModels(t, cfg, application), nil, pick, emptyPrompts(), out, nil, mcpState{}, nil); err != nil {
 		t.Fatalf("replCommand: %v", err)
 	}
 	if out.Len() != 0 {

@@ -49,10 +49,12 @@ type MCPServer struct {
 	Tools []string
 }
 
-// MCPConfig is what a session should connect to.
+// MCPConfig describes the servers configured for a session.
 type MCPConfig struct {
 	// Servers are the enabled servers, sorted by name.
 	Servers []MCPServer
+	// Disabled are the configured servers that should stay disconnected, sorted by name.
+	Disabled []MCPServer
 	// Missing names the variables a ${NAME} referred to that were not set.
 	// They are reported rather than expanded to an empty string, because a
 	// server that starts with half a credential fails in a way that names
@@ -99,10 +101,9 @@ type mcpEntry struct {
 // LoadMCP reads the MCP configuration for one session.
 //
 // Three sources are folded in this order: the global file, the installed
-// plugins, and the project file. A missing global file is not an error: it is
-// the state every install is in before the feature is used. Anything else — a
-// malformed file, an unknown key, a server that names both transports — is,
-// because a config that half-loaded is worse than one that refused.
+// plugins, and the project file. Explicit user switches then override the
+// resulting enabled flags. A missing global file is normal before the feature
+// is used. Malformed files, unknown keys and invalid declarations are errors.
 func LoadMCP(home, cwd string) (MCPConfig, error) {
 	cfg := MCPConfig{Global: filepath.Join(home, MCPFileName)}
 	plugins := LoadPlugins(home)
@@ -134,6 +135,10 @@ func LoadMCP(home, cwd string) (MCPConfig, error) {
 		}
 	}
 
+	settings, err := LoadCapabilities(home)
+	if err != nil {
+		return MCPConfig{}, err
+	}
 	names := make([]string, 0, len(entries))
 	for name := range entries {
 		names = append(names, name)
@@ -156,10 +161,17 @@ func LoadMCP(home, cwd string) (MCPConfig, error) {
 		if err := entry.validate(name); err != nil {
 			return MCPConfig{}, fmt.Errorf("config: %s: mcpServers.%s: %w", cfg.Global, name, err)
 		}
-		if entry.Enabled != nil && !*entry.Enabled {
+		enabled := entry.Enabled == nil || *entry.Enabled
+		if override, ok := settings.MCP[name]; ok {
+			enabled = override
+		}
+		if enabled {
+			cfg.Servers = append(cfg.Servers, entry.resolve(name, &cfg.Missing))
 			continue
 		}
-		cfg.Servers = append(cfg.Servers, entry.resolve(name, &cfg.Missing))
+		// Missing variables only affect startup for servers that will connect.
+		var missing []string
+		cfg.Disabled = append(cfg.Disabled, entry.resolve(name, &missing))
 	}
 
 	sort.Strings(cfg.Missing)

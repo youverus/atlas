@@ -7,6 +7,7 @@ import (
 
 	"pi-go/internal/agent"
 	"pi-go/internal/session"
+	"pi-go/internal/tool"
 	"pi-go/internal/wire"
 )
 
@@ -20,7 +21,7 @@ import (
 const sidePromptSuffix = `
 ## Side conversation
 
-This is a side conversation opened next to the main one. Everything above is a read-only snapshot taken when it was opened: the main conversation keeps running in parallel, and nothing said here reaches it.
+This is a side conversation opened next to the main one. Its starting conversation history is a read-only snapshot: the main conversation keeps running in parallel, and nothing said here reaches it.
 
 - Answer questions and explain. Do not change files or run commands that modify state unless asked explicitly.
 - Do not continue or take over the main task.
@@ -34,16 +35,21 @@ This is a side conversation opened next to the main one. Everything above is a r
 // in-memory session, so it never appears in session listings and leaves nothing
 // behind when it closes.
 type Side struct {
-	mu        sync.Mutex
-	manager   *session.Manager
-	ag        *agent.Agent
-	steering  messageQueue
-	followUps messageQueue
+	mu            sync.Mutex
+	manager       *session.Manager
+	ag            *agent.Agent
+	config        agent.Config
+	promptSource  PromptSource
+	tools         ToolSet
+	parentSession tool.SessionContext
+	steering      messageQueue
+	followUps     messageQueue
 
 	// messages mirrors the side session, for reads that may race with a turn.
 	messages  []wire.Message
 	forkEntry string
 	busy      bool
+	dirty     bool
 	closed    bool
 }
 
@@ -85,9 +91,22 @@ func (a *App) BeginSide() (*Side, error) {
 		messages = append(messages, message)
 	}
 
-	side := &Side{manager: manager, messages: append([]wire.Message(nil), messages...)}
-	side.ag = a.buildAgent(a.sideSystemPrompt(), &side.steering, &side.followUps)
+	side := &Side{
+		manager:      manager,
+		promptSource: a.promptSource,
+		tools:        a.tools,
+		parentSession: tool.SessionContext{
+			ID:   a.manager.ID(),
+			File: a.manager.File(),
+			Cwd:  a.manager.Cwd(),
+		},
+		messages: append([]wire.Message(nil), messages...),
+	}
+	cfg := a.agentConfig(sideSystemPrompt(a.systemPrompt), &side.steering, &side.followUps)
+	side.ag = agent.New(cfg)
 	side.ag.SetMessages(messages)
+	cfg.Tools = nil
+	side.config = cfg
 	if leaf := a.manager.LeafID(); leaf != nil {
 		side.forkEntry = *leaf
 	}
@@ -118,16 +137,8 @@ func (a *App) Side() *Side {
 	return a.side
 }
 
-// sideSystemPrompt is the main prompt plus the side-conversation rules. Callers
-// must hold a.mu.
-//
-// It is a snapshot, like the conversation it was opened from: the side keeps
-// the instructions the main one had when it was opened, and a project file
-// that changes afterwards reaches the next main turn rather than this one.
-// Rebuilding a side agent that is running a turn would swap the agent under
-// it, and the side conversation is explicitly the quiet half of the screen.
-func (a *App) sideSystemPrompt() string {
-	base := strings.TrimSpace(a.systemPrompt)
+func sideSystemPrompt(prompt string) string {
+	base := strings.TrimSpace(prompt)
 	if base == "" {
 		return strings.TrimSpace(sidePromptSuffix)
 	}
@@ -139,6 +150,8 @@ func (a *App) sideSystemPrompt() string {
 // It is independent of the main conversation: the two run concurrently, and a
 // slow side turn never blocks the main one.
 func (s *Side) Ask(ctx context.Context, prompt wire.Message, emit func(wire.AgentEvent) error) (Result, error) {
+	cwd := s.manager.Cwd()
+
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()
@@ -149,16 +162,85 @@ func (s *Side) Ask(ctx context.Context, prompt wire.Message, emit func(wire.Agen
 		return Result{}, ErrBusy
 	}
 	s.busy = true
+	if s.dirty {
+		cfg := s.config
+		if s.tools != nil {
+			cfg.Tools = s.tools(cwd)
+		}
+		s.rebuildLocked(cfg)
+	}
+	promptSource := s.promptSource
+	tools := s.tools
 	ag := s.ag
 	s.mu.Unlock()
 
 	defer func() {
 		s.mu.Lock()
+		if s.dirty && !s.closed {
+			cfg := s.config
+			if s.tools != nil {
+				cfg.Tools = s.tools(cwd)
+			}
+			s.rebuildLocked(cfg)
+		}
 		s.busy = false
 		s.mu.Unlock()
 	}()
 
-	return runTurn(ctx, ag, []wire.Message{prompt}, s.persist, emit)
+	if promptSource != nil {
+		base, err := promptSource(cwd)
+		if err != nil {
+			return Result{}, err
+		}
+		next := sideSystemPrompt(base)
+		s.mu.Lock()
+		tools = s.tools
+		if next != s.config.SystemPrompt {
+			cfg := s.config
+			cfg.SystemPrompt = next
+			if tools != nil {
+				cfg.Tools = tools(cwd)
+			}
+			s.rebuildLocked(cfg)
+		}
+		ag = s.ag
+		s.mu.Unlock()
+	} else {
+		s.mu.Lock()
+		tools = s.tools
+		ag = s.ag
+		s.mu.Unlock()
+	}
+	if tools != nil {
+		ag.Registry().Replace(tools(cwd)...)
+	}
+	return runTurn(tool.WithSession(ctx, s.parentSession), ag, []wire.Message{prompt}, s.persist, emit)
+}
+
+func (s *Side) updateRuntime(cfg agent.Config, tools ToolSet) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return
+	}
+	s.tools = tools
+	if s.busy {
+		cfg.Tools = nil
+		s.config = cfg
+		s.dirty = true
+		return
+	}
+	s.rebuildLocked(cfg)
+}
+
+func (s *Side) rebuildLocked(cfg agent.Config) {
+	messages := s.ag.Messages()
+	next := agent.New(cfg)
+	next.SetMessages(messages)
+	s.ag = next
+	cfg.Tools = nil
+	s.config = cfg
+	s.dirty = false
 }
 
 // Steer queues a message for the running side turn, or for the next one.

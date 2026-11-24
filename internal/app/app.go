@@ -206,6 +206,31 @@ type Config struct {
 	// BeforeToolCall may veto a call; AfterToolCall may rewrite its result.
 	BeforeToolCall func(ctx context.Context, call tool.Call) (*agent.Block, error)
 	AfterToolCall  func(ctx context.Context, call tool.Call, result *tool.Result)
+
+	Subagents SubagentRuntime
+}
+
+// RuntimeConfig holds the config-derived state that can be updated on a live
+// App without recreating the session manager or disrupting an active turn.
+type RuntimeConfig struct {
+	Model            wire.Model
+	Provider         provider.Provider
+	ThinkingLevel    string
+	Tools            ToolSet
+	Resolver         Resolver
+	Models           []ModelOption
+	FitThinking      ThinkingFitter
+	GoalBudget       int
+	SessionDir       SessionDirFunc
+	OverrideModel    bool
+	OverrideThinking bool
+}
+
+type pendingModelChange struct {
+	model            wire.Model
+	provider         provider.Provider
+	thinking         string
+	overrideThinking bool
 }
 
 // App binds one session to one agent.
@@ -225,7 +250,9 @@ type App struct {
 	// tools is the set the conversation asks for by directory, not the tools
 	// themselves: the answer changes with the session, and a slice captured at
 	// startup would describe the directory this process started in forever.
-	tools ToolSet
+	tools        ToolSet
+	subagents    SubagentRuntime
+	subagentTool tool.Tool
 
 	// sessionDir names the store a conversation started in another directory
 	// belongs to. Nil means the pi-style default under the agent home.
@@ -261,6 +288,10 @@ type App struct {
 	baseSystemPrompt string
 	basePromptSource PromptSource
 
+	// pendingModel holds a reloaded defaultModel override while a turn is
+	// running on the previous model so it takes effect on the next user message.
+	pendingModel *pendingModelChange
+
 	ag *agent.Agent
 	// messages mirrors what the session holds, so reads stay off the agent's
 	// transcript while a turn is appending to it.
@@ -291,6 +322,7 @@ func New(cfg Config, manager *session.Manager) (*App, error) {
 		models:       cloneModels(cfg.Models),
 		fitThinking:  cfg.FitThinking,
 		tools:        cfg.Tools,
+		subagents:    cfg.Subagents,
 		sessionDir:   cfg.SessionDir,
 		execution:    cfg.ToolExecution,
 		maxParallel:  cfg.MaxParallel,
@@ -303,22 +335,7 @@ func New(cfg Config, manager *session.Manager) (*App, error) {
 		thinking:     cfg.ThinkingLevel,
 		promptSource: cfg.SystemPrompt,
 	}
-	if a.thinking == "" {
-		a.thinking = session.DefaultThinkingLevel
-	}
-	// The default is a gear, so it has to be one this model can express. A row
-	// that declares off/low/high has no medium, and sending a level the picker
-	// never offered would leave the reader with a setting they cannot see. A
-	// model with no reasoning axis falls back to off, which is the only thing it
-	// can be told; a configured level is left alone, because it is the reader's
-	// answer and the CLI already reported a mismatch.
-	if a.thinking == session.DefaultThinkingLevel && cfg.FitThinking != nil {
-		fitted, _, err := cfg.FitThinking(a.model, a.thinking)
-		if err != nil || fitted == "" {
-			fitted = "off"
-		}
-		a.thinking = fitted
-	}
+	a.thinking = defaultThinkingFor(a.model, a.thinking, cfg.FitThinking)
 	if cfg.Compaction != nil {
 		a.compaction = *cfg.Compaction
 	}
@@ -466,14 +483,22 @@ func (a *App) refreshTools(ag *agent.Agent) {
 	if ag == nil {
 		return
 	}
-	ag.Registry().Replace(a.toolsOf()...)
+	tools := a.toolsOf()
+	if a.subagentTool != nil {
+		tools = append(tools, a.subagentTool)
+	}
+	ag.Registry().Replace(tools...)
 }
 
 // buildAgent creates an agent from the current immutable knobs. Callers must
 // hold a.mu, and the returned agent must be replaced rather than mutated when a
 // knob changes, because agent.Config is immutable by contract.
 func (a *App) buildAgent(prompt string, steering, followUps *messageQueue) *agent.Agent {
-	return agent.New(agent.Config{
+	return agent.New(a.agentConfig(prompt, steering, followUps))
+}
+
+func (a *App) agentConfig(prompt string, steering, followUps *messageQueue) agent.Config {
+	return agent.Config{
 		Model:               a.model,
 		Provider:            a.provider,
 		ThinkingLevel:       a.thinking,
@@ -485,7 +510,7 @@ func (a *App) buildAgent(prompt string, steering, followUps *messageQueue) *agen
 		AfterToolCall:       a.after,
 		GetSteeringMessages: steering.drain,
 		GetFollowUpMessages: followUps.drain,
-	})
+	}
 }
 
 // rebuild recreates the agent after a model or thinking level change, keeping
@@ -494,6 +519,24 @@ func (a *App) rebuild() {
 	messages := a.ag.Messages()
 	a.ag = a.buildAgent(a.systemPrompt, &a.steering, &a.followUps)
 	a.ag.SetMessages(messages)
+	a.syncSideLocked()
+}
+
+func (a *App) syncSideLocked() {
+	if a.side == nil {
+		return
+	}
+	cfg := a.agentConfig(sideSystemPrompt(a.systemPrompt), &a.side.steering, &a.side.followUps)
+	if a.pendingModel != nil {
+		cfg.Model = a.pendingModel.model
+		cfg.Provider = a.pendingModel.provider
+		thinking := a.thinking
+		if a.pendingModel.overrideThinking {
+			thinking = a.pendingModel.thinking
+		}
+		cfg.ThinkingLevel = a.fitLevel(cfg.Model, thinking)
+	}
+	a.side.updateRuntime(cfg, a.tools)
 }
 
 // refreshPrompt reads the instructions again and rebuilds the agent when they
@@ -695,13 +738,226 @@ func (a *App) SetName(name string) error {
 	return err
 }
 
+// PendingModel reports a queued model change waiting for the next user message.
+func (a *App) PendingModel() (wire.Model, bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.pendingModel == nil {
+		return wire.Model{}, false
+	}
+	return a.pendingModel.model, true
+}
+
+// ReloadConfig replaces config-derived models, resolvers, tools, and defaults on
+// a running App. When OverrideModel is true and the session is idle and
+// writable, the current session switches to cfg.Model right away. While a turn
+// is running on the previous model, the active turn is left untouched and the
+// model change is queued until the next user message.
+func (a *App) ReloadConfig(cfg RuntimeConfig) error {
+	if cfg.Provider == nil {
+		return errors.New("app: RuntimeConfig.Provider is required")
+	}
+	if cfg.Model.ID == "" {
+		return errors.New("app: RuntimeConfig.Model.ID is required")
+	}
+	baseThinking := defaultThinkingFor(cfg.Model, cfg.ThinkingLevel, cfg.FitThinking)
+
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	a.resolver = cfg.Resolver
+	a.models = cloneModels(cfg.Models)
+	a.fitThinking = cfg.FitThinking
+	if cfg.Tools != nil {
+		a.tools = cfg.Tools
+	}
+	if cfg.SessionDir != nil {
+		a.sessionDir = cfg.SessionDir
+	}
+	a.goalBudget = cfg.GoalBudget
+	a.baseModel = cfg.Model
+	a.baseProvider = cfg.Provider
+	a.baseThinking = baseThinking
+
+	if a.busy {
+		if cfg.OverrideModel || cfg.OverrideThinking {
+			a.pendingModel = &pendingModelChange{
+				model:            cfg.Model,
+				provider:         cfg.Provider,
+				thinking:         baseThinking,
+				overrideThinking: cfg.OverrideThinking,
+			}
+		} else if a.pendingModel != nil && a.resolver != nil {
+			if refreshed, streamer, err := a.resolver(a.pendingModel.model.Provider, a.pendingModel.model.ID); err == nil {
+				a.pendingModel.model = refreshed
+				a.pendingModel.provider = streamer
+			} else {
+				a.pendingModel.model = cfg.Model
+				a.pendingModel.provider = cfg.Provider
+			}
+		} else if a.resolver != nil {
+			// A credential, baseUrl, or protocol edit can leave defaultModel on
+			// the same provider/id while replacing the streamer. Queue it for the
+			// next turn so the in-flight turn finishes untouched and later turns
+			// pick up the new provider instance.
+			refreshed, streamer, err := a.resolver(a.model.Provider, a.model.ID)
+			if err != nil {
+				refreshed, streamer = cfg.Model, cfg.Provider
+			}
+			a.pendingModel = &pendingModelChange{
+				model:    refreshed,
+				provider: streamer,
+				thinking: baseThinking,
+			}
+		}
+		a.syncSideLocked()
+		return nil
+	}
+
+	if a.guardArchived() != nil {
+		if cfg.OverrideModel || cfg.OverrideThinking {
+			a.pendingModel = &pendingModelChange{
+				model:            cfg.Model,
+				provider:         cfg.Provider,
+				thinking:         baseThinking,
+				overrideThinking: cfg.OverrideThinking,
+			}
+		}
+		return nil
+	}
+
+	var update pendingModelChange
+	hasUpdate := false
+	switch {
+	case cfg.OverrideModel:
+		update = pendingModelChange{
+			model:            cfg.Model,
+			provider:         cfg.Provider,
+			thinking:         baseThinking,
+			overrideThinking: cfg.OverrideThinking,
+		}
+		hasUpdate = true
+	case a.pendingModel != nil:
+		update = *a.pendingModel
+		if a.resolver != nil {
+			if refreshed, streamer, err := a.resolver(update.model.Provider, update.model.ID); err == nil {
+				update.model = refreshed
+				update.provider = streamer
+			} else {
+				update.model = cfg.Model
+				update.provider = cfg.Provider
+			}
+		}
+		if cfg.OverrideThinking {
+			update.thinking = baseThinking
+			update.overrideThinking = true
+		}
+		hasUpdate = true
+	case a.resolver != nil:
+		refreshed, streamer, err := a.resolver(a.model.Provider, a.model.ID)
+		if err != nil {
+			// The session's previous model is no longer declared: fall back to
+			// the newly configured default model.
+			refreshed, streamer = cfg.Model, cfg.Provider
+		}
+		update = pendingModelChange{
+			model:            refreshed,
+			provider:         streamer,
+			thinking:         baseThinking,
+			overrideThinking: cfg.OverrideThinking,
+		}
+		hasUpdate = true
+	case cfg.OverrideThinking:
+		update = pendingModelChange{
+			model:            a.model,
+			provider:         a.provider,
+			thinking:         baseThinking,
+			overrideThinking: true,
+		}
+		hasUpdate = true
+	}
+
+	a.pendingModel = nil
+	if !hasUpdate {
+		a.syncSideLocked()
+		return nil
+	}
+	return a.applyModelUpdateLocked(update)
+}
+
+func defaultThinkingFor(model wire.Model, level string, fit ThinkingFitter) string {
+	if level == "" {
+		level = session.DefaultThinkingLevel
+	}
+	// The default is a gear, so it has to be one this model can express. A row
+	// that declares off/low/high has no medium, and sending a level the picker
+	// never offered would leave the reader with a setting they cannot see. A
+	// model with no reasoning axis falls back to off, which is the only thing it
+	// can be told; a configured level is left alone, because it is the reader's
+	// answer and the CLI already reported a mismatch.
+	if level == session.DefaultThinkingLevel && fit != nil {
+		fitted, _, err := fit(model, level)
+		if err != nil || fitted == "" {
+			return "off"
+		}
+		return fitted
+	}
+	return level
+}
+
+func (a *App) applyModelUpdateLocked(update pendingModelChange) error {
+	if update.model.Provider != a.model.Provider || update.model.ID != a.model.ID {
+		if _, err := a.manager.AppendModelChange(update.model.Provider, update.model.ID); err != nil {
+			return err
+		}
+	}
+	a.model = update.model
+	a.provider = update.provider
+	a.restoreNote = ""
+
+	nextThinking := a.thinking
+	if update.overrideThinking {
+		nextThinking = update.thinking
+	}
+	nextThinking = a.fitLevel(a.model, nextThinking)
+	if update.overrideThinking && nextThinking != a.thinking {
+		if _, err := a.manager.AppendThinkingLevelChange(nextThinking); err != nil {
+			return err
+		}
+	}
+	a.thinking = nextThinking
+	a.rebuild()
+	return nil
+}
+
+func (a *App) applyPendingModelLocked() error {
+	if a.pendingModel == nil {
+		return nil
+	}
+	update := *a.pendingModel
+	if a.resolver != nil {
+		if refreshed, streamer, err := a.resolver(update.model.Provider, update.model.ID); err == nil {
+			update.model = refreshed
+			update.provider = streamer
+		}
+	}
+	if err := a.applyModelUpdateLocked(update); err != nil {
+		return err
+	}
+	a.pendingModel = nil
+	return nil
+}
+
 // SetModel switches models and records the change. The resolver runs first, so a
 // failed lookup leaves the app untouched.
 func (a *App) SetModel(providerName, modelID string) (wire.Model, error) {
-	if a.resolver == nil {
+	a.mu.Lock()
+	resolver := a.resolver
+	a.mu.Unlock()
+	if resolver == nil {
 		return wire.Model{}, errors.New("app: SetModel needs a Resolver")
 	}
-	model, streamer, err := a.resolver(providerName, modelID)
+	model, streamer, err := resolver(providerName, modelID)
 	if err != nil {
 		return wire.Model{}, err
 	}
@@ -720,6 +976,7 @@ func (a *App) SetModel(providerName, modelID string) (wire.Model, error) {
 	a.model = model
 	a.provider = streamer
 	a.restoreNote = ""
+	a.pendingModel = nil
 	// A level only exists on the axis of the model in effect. Switching to a
 	// model that cannot think has to turn thinking off, or the session keeps
 	// reporting a gear the new model has no way to send.
@@ -918,6 +1175,16 @@ func (a *App) SetSystemPrompt(prompt string) error {
 // underneath an agent that is still appending would record messages into a
 // conversation that no longer exists.
 func (a *App) NewSession() error {
+	return a.newSession(true)
+}
+
+// NewSessionLeavingArchived starts a fresh empty conversation even when the one
+// currently in view is archived, leaving the archived file untouched.
+func (a *App) NewSessionLeavingArchived() error {
+	return a.newSession(false)
+}
+
+func (a *App) newSession(guardArchived bool) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.busy {
@@ -926,8 +1193,10 @@ func (a *App) NewSession() error {
 	// An archived conversation is read-only, and abandoning it for a fresh one
 	// is exactly the move that leaves it behind half-said. /restore lifts the
 	// lock; /delete ends the session on purpose.
-	if err := a.guardArchived(); err != nil {
-		return err
+	if guardArchived {
+		if err := a.guardArchived(); err != nil {
+			return err
+		}
 	}
 	// The old session is deliberately not written here. Its file exists only
 	// once it holds a user or assistant message, so a conversation the user
@@ -952,7 +1221,10 @@ func (a *App) newSessionLocked() error {
 	a.followUps.clear()
 	a.steering.setMode("")
 	a.followUps.setMode("")
-	return a.refresh()
+	if err := a.refresh(); err != nil {
+		return err
+	}
+	return a.applyPendingModelLocked()
 }
 
 // Branch moves the active leaf to entryID and rebuilds the transcript from the

@@ -143,7 +143,7 @@ const twoResults = `{"results": [
 // ranking is for.
 func TestSearchSendsTheQueryAndRendersTheRanking(t *testing.T) {
 	s := newStub(t, reply{status: 200, body: twoResults})
-	result, err := s.run(t, "websearch", `{"query": "DeepSeek V4 模型"}`)
+	result, err := s.run(t, "deepseek_web_search", `{"query": "DeepSeek V4 模型"}`)
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
@@ -200,7 +200,7 @@ func TestSearchClampsTheCount(t *testing.T) {
 		{`{"query": "x", "count": 5}`, 5},
 	} {
 		s := newStub(t, reply{status: 200, body: `{"results": []}`})
-		if _, err := s.run(t, "websearch", testCase.arguments); err != nil {
+		if _, err := s.run(t, "deepseek_web_search", testCase.arguments); err != nil {
 			t.Fatalf("%s: %v", testCase.arguments, err)
 		}
 		if got := s.calls()[0].body["count"]; got != testCase.want {
@@ -214,7 +214,7 @@ func TestSearchClampsTheCount(t *testing.T) {
 // never left the machine costs neither money nor a round trip.
 func TestSearchRefusesAnEmptyQuery(t *testing.T) {
 	s := newStub(t, reply{status: 200, body: `{"results": []}`})
-	if _, err := s.run(t, "websearch", `{"query": "   "}`); err == nil {
+	if _, err := s.run(t, "deepseek_web_search", `{"query": "   "}`); err == nil {
 		t.Fatal("an empty query was accepted")
 	}
 	if calls := s.calls(); len(calls) != 0 {
@@ -227,7 +227,7 @@ func TestSearchRefusesAnEmptyQuery(t *testing.T) {
 // rather than retry.
 func TestSearchSaysWhenNothingWasFound(t *testing.T) {
 	s := newStub(t, reply{status: 200, body: `{"results": []}`})
-	result, err := s.run(t, "websearch", `{"query": "nothing at all"}`)
+	result, err := s.run(t, "deepseek_web_search", `{"query": "nothing at all"}`)
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
@@ -240,7 +240,7 @@ func TestSearchSaysWhenNothingWasFound(t *testing.T) {
 // here that a stranger wrote, so it arrives labelled as a source.
 func TestFetchWrapsThePage(t *testing.T) {
 	s := newStub(t, reply{status: 200, body: `{"title": "Title", "content": "# Title\n\nBody text."}`})
-	result, err := s.run(t, "webfetch", `{"url": "https://example.com/x"}`)
+	result, err := s.run(t, "deepseek_web_fetch", `{"url": "https://example.com/x"}`)
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
@@ -274,7 +274,7 @@ func TestFetchRefusesWhatTheEndpointWould(t *testing.T) {
 		`{"url": "not a url"}`,
 	} {
 		s := newStub(t, reply{status: 200, body: `{"content": "x"}`})
-		if _, err := s.run(t, "webfetch", raw); err == nil {
+		if _, err := s.run(t, "deepseek_web_fetch", raw); err == nil {
 			t.Fatalf("%s was accepted", raw)
 		}
 		if calls := s.calls(); len(calls) != 0 {
@@ -291,6 +291,17 @@ func TestNoCredentialMeansNoTools(t *testing.T) {
 	}
 }
 
+// TestToolsExposeDeepSeekNamesAndOrder pins the tool names and order.
+func TestToolsExposeDeepSeekNamesAndOrder(t *testing.T) {
+	set := Tools(Options{APIKey: "test-key"})
+	if len(set) != 2 {
+		t.Fatalf("Tools returned %d tool(s), want 2", len(set))
+	}
+	if set[0].Name() != "deepseek_web_search" || set[1].Name() != "deepseek_web_fetch" {
+		t.Fatalf("tool names = [%q, %q], want [deepseek_web_search, deepseek_web_fetch]", set[0].Name(), set[1].Name())
+	}
+}
+
 // TestServerErrorsAreRetriedOnce covers the half of the error table that is
 // worth another attempt. Five hundred and three is what a busy endpoint says,
 // and the second call is what turns it into an answer.
@@ -299,7 +310,7 @@ func TestServerErrorsAreRetriedOnce(t *testing.T) {
 		reply{status: 503, body: `{"error": {"message": "busy"}}`},
 		reply{status: 200, body: twoResults},
 	)
-	if _, err := s.run(t, "websearch", `{"query": "x"}`); err != nil {
+	if _, err := s.run(t, "deepseek_web_search", `{"query": "x"}`); err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
 	if calls := s.calls(); len(calls) != 2 {
@@ -311,7 +322,7 @@ func TestServerErrorsAreRetriedOnce(t *testing.T) {
 // will not become readable, and the vendor says so explicitly.
 func TestAClientErrorIsNotRetried(t *testing.T) {
 	s := newStub(t, reply{status: 404, body: `{"error": {"message": "no content"}}`})
-	_, err := s.run(t, "webfetch", `{"url": "https://example.com/gone"}`)
+	_, err := s.run(t, "deepseek_web_fetch", `{"url": "https://example.com/gone"}`)
 	if err == nil {
 		t.Fatal("a 404 was reported as success")
 	}
@@ -328,7 +339,7 @@ func TestAClientErrorIsNotRetried(t *testing.T) {
 // work, so the line says whose problem it is — and it must not quote the key.
 func TestAnEmptyBalanceIsNamedAsSuch(t *testing.T) {
 	s := newStub(t, reply{status: 402, body: `{"error": {"message": "insufficient balance"}}`})
-	_, err := s.run(t, "websearch", `{"query": "x"}`)
+	_, err := s.run(t, "deepseek_web_search", `{"query": "x"}`)
 	if err == nil {
 		t.Fatal("a 402 was reported as success")
 	}
@@ -356,7 +367,7 @@ func TestACancelledTurnDoesNotRetry(t *testing.T) {
 	})
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, err := set[0].Execute(ctx, tool.Call{Name: "websearch", Arguments: json.RawMessage(`{"query": "x"}`)}, func(tool.Partial) {}); err == nil {
+	if _, err := set[0].Execute(ctx, tool.Call{Name: "deepseek_web_search", Arguments: json.RawMessage(`{"query": "x"}`)}, func(tool.Partial) {}); err == nil {
 		t.Fatal("a cancelled turn reported success")
 	}
 	if calls := s.calls(); len(calls) != 0 {
@@ -378,7 +389,7 @@ func TestFetchSpillsThePageItCannotShow(t *testing.T) {
 	spill := tool.NewSpill(func() string { return spillDir })
 
 	s := newStub(t, reply{status: 200, body: string(payload)})
-	result, err := s.runWithSpill(t, "webfetch", `{"url": "https://example.com/long"}`, spill)
+	result, err := s.runWithSpill(t, "deepseek_web_fetch", `{"url": "https://example.com/long"}`, spill)
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
 	}

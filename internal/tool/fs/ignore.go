@@ -2,7 +2,6 @@ package fs
 
 import (
 	"bufio"
-	"os"
 	"path"
 	"strings"
 )
@@ -42,8 +41,8 @@ func newIgnoreStack() *ignoreStack {
 
 // push reads dir/.gitignore and adds its rules. It returns how many levels were
 // added so the walker can undo exactly that.
-func (s *ignoreStack) push(dir, prefix string) int {
-	data, err := os.ReadFile(path.Join(dir, ".gitignore"))
+func (s *ignoreStack) push(dir, prefix string, readFile func(string) ([]byte, error)) int {
+	data, err := readFile(joinAccessPath(dir, ".gitignore"))
 	if err != nil {
 		return 0
 	}

@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -76,8 +75,11 @@ func (t grepTool) Execute(ctx context.Context, call tool.Call, onUpdate func(too
 	if request.Path != "" {
 		searchPath = request.Path
 	}
-	searchRoot := t.set.resolve(searchPath)
-	info, err := os.Stat(searchRoot)
+	searchRoot, err := t.set.resolveAccess(searchPath)
+	if err != nil {
+		return tool.Result{}, err
+	}
+	info, err := t.set.stat(searchRoot)
 	if err != nil {
 		if isNotExist(err) {
 			return tool.Result{}, fmt.Errorf("Path not found: %s", searchRoot)
@@ -102,7 +104,7 @@ func (t grepTool) Execute(ctx context.Context, call tool.Call, onUpdate func(too
 	linesTruncated := false
 
 	handleFile := func(rel, full string) (bool, error) {
-		content, readErr := os.ReadFile(full)
+		content, readErr := t.set.readFile(full)
 		if readErr != nil {
 			// A file that vanished or is unreadable is skipped, the way rg does.
 			return true, nil
@@ -133,6 +135,7 @@ func (t grepTool) Execute(ctx context.Context, call tool.Call, onUpdate func(too
 		}
 		w := &walker{
 			ctx:     ctx,
+			set:     t.set,
 			ignores: newIgnoreStack(),
 			visit: func(entry walkEntry) (bool, error) {
 				if !checkGlob(entry.Rel, entry.IsDir) {
@@ -166,9 +169,9 @@ func (t grepTool) Execute(ctx context.Context, call tool.Call, onUpdate func(too
 		}
 		full := searchRoot
 		if isDirectory {
-			full = filepath.Join(searchRoot, filepath.FromSlash(rel))
+			full = joinAccessPath(searchRoot, filepath.FromSlash(rel))
 		}
-		content, readErr := os.ReadFile(full)
+		content, readErr := t.set.readFile(full)
 		if readErr != nil {
 			lineCache[rel] = nil
 			return nil

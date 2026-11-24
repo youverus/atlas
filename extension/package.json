@@ -1,0 +1,15 @@
+{
+  "name": "atlas-extension",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Atlas 浏览器扩展：连接本机 Atlas 内核的 AI 能力",
+  "scripts": {
+    "build": "node build.mjs",
+    "check": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/chrome": "^0.0.287",
+    "esbuild": "^0.24.2",
+    "typescript": "^5.6.3"
+  }
+}

@@ -12,7 +12,8 @@ export interface StreamHandlers {
   onAgent: (event: AgentEvent) => void;
   onStatus: (status: Status) => void;
   onApproval: (question: PendingQuestion) => void;
-  onHello: (facts: { version?: string; directory?: string; model?: string }) => void;
+  onApprovalResolved: (id: string) => void;
+  onHello: (facts: { version?: string; directory?: string; model?: string; session?: string }) => void;
   onConnect: (connected: boolean) => void;
   /** 侧对话的事件走另外两个名字：一段流里有两个 agent，靠名字分开比在每一帧
    *  里塞一个标记便宜——折叠处不用为每个 case 多判断一次。 */
@@ -41,6 +42,9 @@ export function useStream(handlers: StreamHandlers): void {
     });
     source.addEventListener("approval", (message) => {
       latest.current.onApproval(JSON.parse((message as MessageEvent).data));
+    });
+    source.addEventListener("approval_resolved", (message) => {
+      latest.current.onApprovalResolved(JSON.parse((message as MessageEvent).data).id);
     });
     // 侧对话的两个名字。分开的理由在 StreamHandlers 上：两条流同时活着。
     source.addEventListener("sideagent", (message) => {

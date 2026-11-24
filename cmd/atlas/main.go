@@ -40,7 +40,7 @@ import (
 
 // version is the CLI's own version. The window title quotes it, so it lives on
 // its own rather than inside the code that draws it.
-const version = "0.12.30"
+const version = "0.19.0"
 
 // spillDirName is the subdirectory of a session bucket where output too large
 // for a message is written. It sits beside the .jsonl files rather than in one
@@ -65,9 +65,11 @@ usage:
   atlas -tui                    interactive session on the alternate screen
   echo "..." | atlas            read the prompt from stdin
   atlas -rpc                    serve pi's JSONL RPC protocol on stdin/stdout
+  atlas -serve                  serve the HTTP+SSE control plane on loopback
   atlas -demo [prompt]          run the scripted offline demo
   atlas -list-models            print the configured models
   atlas -resume <id|path>       continue a recorded session
+  atlas -version                print the atlas version and exit
 
 flags:
 `
@@ -102,10 +104,15 @@ type options struct {
 	// prompt" a testable claim rather than a promise.
 	noSkills bool
 
-	asJSON     bool
-	rpcMode    bool
-	demo       bool
-	listModels bool
+	asJSON      bool
+	rpcMode     bool
+	serveHTTP   bool
+	listenAddr  string
+	authToken   string
+	serveInfo   string
+	demo        bool
+	listModels  bool
+	showVersion bool
 
 	// tui asks for the full-screen session. A terminal gets it anyway, so the
 	// flag is the explicit form of the intent — and the only way to ask for it
@@ -207,8 +214,13 @@ func parseFlags(args []string) (options, error) {
 	flags.StringVar(&opts.workdir, "cwd", "", "working directory for tools and sessions (default the current one)")
 	flags.BoolVar(&opts.asJSON, "json", false, "write agent events as JSONL")
 	flags.BoolVar(&opts.rpcMode, "rpc", false, "serve the JSONL RPC protocol on stdin and stdout")
+	flags.BoolVar(&opts.serveHTTP, "serve", false, "serve the HTTP+SSE control plane on loopback")
+	flags.StringVar(&opts.listenAddr, "listen", "127.0.0.1:0", "loopback listen address for -serve (default 127.0.0.1:0)")
+	flags.StringVar(&opts.authToken, "auth-token", "", "bearer token for -serve (or ATLAS_SERVE_TOKEN env)")
+	flags.StringVar(&opts.serveInfo, "serve-info", "", "write -serve runtime metadata JSON to this file")
 	flags.BoolVar(&opts.demo, "demo", false, "run the scripted demo: no config, no network, no api key")
 	flags.BoolVar(&opts.listModels, "list-models", false, "print the configured models and exit")
+	flags.BoolVar(&opts.showVersion, "version", false, "print the atlas version and exit")
 	flags.BoolVar(&opts.tui, "tui", false, "draw the session full-screen (what a terminal gets anyway)")
 
 	if err := flags.Parse(args); err != nil {
@@ -229,6 +241,8 @@ func parseFlags(args []string) (options, error) {
 		return options{}, errors.New("-resume names a session, and -session and -continue name another; choose one")
 	case opts.rpcMode && opts.prompt != "":
 		return options{}, errors.New("-rpc reads commands from stdin; drop the prompt")
+	case opts.serveHTTP && (opts.rpcMode || opts.tui || opts.demo || opts.prompt != ""):
+		return options{}, errors.New("-serve runs headless HTTP+SSE and cannot be combined with -rpc, -tui, -demo or a prompt")
 	case opts.permissionMode != "" && !permission.ValidMode(opts.permissionMode):
 		return options{}, fmt.Errorf("-permission %q is not one of: %s", opts.permissionMode, strings.Join(config.PermissionModes, ", "))
 	case opts.demo && (opts.configPath != "" || opts.model != "" || opts.thinking != "" || opts.listModels):
@@ -241,12 +255,19 @@ func parseFlags(args []string) (options, error) {
 }
 
 func run(ctx context.Context, opts options, stdio streams) error {
+	if opts.showVersion {
+		fmt.Fprintln(stdio.out, version)
+		return nil
+	}
 	cwd, err := assembly.ResolveDir(opts.workdir)
 	if err != nil {
 		return err
 	}
 	if opts.demo {
 		return runDemo(ctx, opts, cwd, stdio)
+	}
+	if opts.serveHTTP {
+		return runServeHTTP(ctx, opts, cwd, stdio)
 	}
 
 	cfg, err := assembly.LoadConfig(opts.configPath)
@@ -268,6 +289,7 @@ func run(ctx context.Context, opts options, stdio streams) error {
 // runConfigured is the mode that talks to a real endpoint.
 func runConfigured(ctx context.Context, opts options, cwd string, cfg *config.Config, stdio streams) error {
 	request := opts.assembly()
+	request.EnableSubagents = stdio.terminal && opts.prompt == "" && !opts.rpcMode && !opts.asJSON
 	// A -resume prefix is resolved here rather than in the assembly: the search
 	// reads the session list and can print the candidates it refused, and a
 	// window has no menu to read them on.
@@ -433,6 +455,8 @@ func serve(ctx context.Context, kernel *assembly.Kernel, side *sideState, opts o
 	// The session reads the terminal itself, from here on. Building anything
 	// else that reads it first would leave two readers taking each other's
 	// keystrokes.
+	ctx = withBrowserService(ctx, kernel.Browser())
+	ctx = withSubagentRuntime(ctx, kernel.SetSubagentObserver)
 	return runTUI(ctx, application, side, mcpState{servers}, modelSet,
 		newSessionPicker(application, allHome(opts, cfg)), prompts,
 		newStatusBar(application, side, cwd, grants), cfg, cwd, stdio)

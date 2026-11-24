@@ -40,6 +40,8 @@ const (
 	// ErrorCodeContextOverflow means the request did not fit the model's
 	// context window. The turn can be recovered by summarizing and retrying.
 	ErrorCodeContextOverflow = "context_overflow"
+	// ErrorCodeStreamIdleTimeout means the endpoint stopped emitting stream events.
+	ErrorCodeStreamIdleTimeout = "stream_idle_timeout"
 )
 
 // Message is the wire form of every agent message. Roles share one struct so
@@ -55,7 +57,8 @@ type Message struct {
 	ToolsRemoved []ToolReference    `json:"toolsRemoved,omitempty"`
 
 	// Common metadata. Milliseconds since the Unix epoch.
-	Timestamp int64 `json:"timestamp"`
+	Timestamp int64           `json:"timestamp"`
+	Subagent  *SubagentUpdate `json:"subagent,omitempty"`
 
 	// Assistant messages.
 	API                   string          `json:"api,omitempty"`

@@ -48,6 +48,7 @@ const (
 	AgentEventToolExecEnd     = "tool_execution_end"
 	AgentEventCompactionStart = "compaction_start"
 	AgentEventCompactionEnd   = "compaction_end"
+	AgentEventSubagentUpdate  = "subagent_update"
 )
 
 // Compaction reasons. Overflow is a recovery attempt: the request did not fit
@@ -80,6 +81,7 @@ type AgentEvent struct {
 	Messages       []Message       `json:"messages,omitempty"`
 	AssistantEvent *AssistantEvent `json:"assistantMessageEvent,omitempty"`
 	ToolResults    []Message       `json:"toolResults,omitempty"`
+	Subagent       *SubagentUpdate `json:"subagent,omitempty"`
 
 	ToolCallID    string          `json:"toolCallId,omitempty"`
 	ToolName      string          `json:"toolName,omitempty"`
@@ -91,9 +93,10 @@ type AgentEvent struct {
 	IsError    *bool           `json:"isError,omitempty"`
 	DurationMs *int64          `json:"durationMs,omitempty"`
 
+	Aborted *bool `json:"aborted,omitempty"` // Set for interrupted tools or compaction.
+
 	// compaction_start and compaction_end.
 	Reason       string `json:"reason,omitempty"`
-	Aborted      *bool  `json:"aborted,omitempty"`
 	WillRetry    *bool  `json:"willRetry,omitempty"`
 	ErrorMessage string `json:"errorMessage,omitempty"`
 }

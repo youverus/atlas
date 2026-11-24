@@ -1,9 +1,24 @@
+import type { MouseEvent } from "react";
 import Markdown from "react-markdown";
 import rehypeKatex from "rehype-katex";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 
+import { api } from "../api";
 import { remarkGuardInlineMath } from "../lib/math";
+
+function openMarkdownLink(event: MouseEvent<HTMLAnchorElement>, href?: string) {
+  if (!href || !/^https?:\/\//i.test(href)) return;
+  event.preventDefault();
+  void api
+    .browserOpen(href)
+    .then((tab) => {
+      window.dispatchEvent(new CustomEvent("atlas:browser-opened", { detail: { tab } }));
+    })
+    .catch(() => {
+      window.open(href, "_blank", "noopener,noreferrer");
+    });
+}
 
 // A model's answer is markdown, and GFM is the dialect it writes without being
 // asked: tables and strikethrough are common enough that a renderer without
@@ -22,7 +37,13 @@ export function MarkdownBody({ text }: { text: string }) {
         rehypePlugins={[[rehypeKatex, { strict: false }]]}
         components={{
           a: ({ node: _node, ...props }) => (
-            <a {...props} target="_blank" rel="noreferrer noopener" />
+            <a
+              {...props}
+              target="_blank"
+              rel="noreferrer noopener"
+              title={props.href ? `在受控浏览器中打开: ${props.href}` : undefined}
+              onClick={(event) => openMarkdownLink(event, props.href)}
+            />
           ),
         }}
       >

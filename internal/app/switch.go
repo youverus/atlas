@@ -31,6 +31,18 @@ import (
 // exist: a project that was deleted cannot host the tools, and there is no
 // override here — a tool call would otherwise fail on its first path.
 func (a *App) SwitchSession(path string) error {
+	return a.switchSession(path, true)
+}
+
+// SwitchSessionLeavingArchived continues a different session file even when the
+// conversation currently in view is archived. A windowed viewer can inspect an
+// archived transcript read-only and still navigate away to another conversation
+// without restoring or deleting it; the archived file itself stays untouched.
+func (a *App) SwitchSessionLeavingArchived(path string) error {
+	return a.switchSession(path, false)
+}
+
+func (a *App) switchSession(path string, guardArchived bool) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.busy {
@@ -62,8 +74,10 @@ func (a *App) SwitchSession(path string) error {
 	if err != nil {
 		return err
 	}
-	if err := a.guardArchived(); err != nil {
-		return err
+	if guardArchived {
+		if err := a.guardArchived(); err != nil {
+			return err
+		}
 	}
 	// The instructions of the project being opened, read before anything is
 	// swapped: a file that cannot be read refuses the switch instead of
@@ -100,6 +114,7 @@ func (a *App) SwitchSession(path string) error {
 	a.model = a.baseModel
 	a.provider = a.baseProvider
 	a.thinking = a.baseThinking
+	a.pendingModel = nil
 	a.systemPrompt = prompt
 	// The source comes back with the other knobs: dropping it was a fact about
 	// the session that was left, not about this one. It is nil again when the

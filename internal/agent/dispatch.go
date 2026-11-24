@@ -37,7 +37,7 @@ func (a *Agent) dispatchTruncated(ctx context.Context, calls []wire.Content, em 
 		))
 		message := a.finalize(ctx, call, result, 0, false)
 		messages[i] = message
-		emitEnd(em, call, result, 0)
+		emitEnd(em, call, result, 0, false)
 		emitResultMessages(em, message)
 	}
 	return messages, false
@@ -53,9 +53,10 @@ func (a *Agent) dispatchSequential(ctx context.Context, calls []wire.Content, em
 
 		impl, denial := a.prepare(ctx, call)
 		if denial != nil {
-			message := a.finalize(ctx, call, *denial, 0, false)
+			stopped := ctx.Err() != nil
+			message := a.finalize(ctx, call, *denial, 0, stopped)
 			messages[i] = message
-			emitEnd(em, call, *denial, 0)
+			emitEnd(em, call, *denial, 0, stopped)
 			emitResultMessages(em, message)
 			continue
 		}
@@ -66,7 +67,7 @@ func (a *Agent) dispatchSequential(ctx context.Context, calls []wire.Content, em
 		message := a.finalize(ctx, call, result, duration, stopped)
 		messages[i] = message
 		terminates[i] = result.Terminate
-		emitEnd(em, call, result, duration)
+		emitEnd(em, call, result, duration, stopped)
 		emitResultMessages(em, message)
 	}
 
@@ -92,9 +93,10 @@ func (a *Agent) dispatchParallel(ctx context.Context, calls []wire.Content, em *
 
 		impl, denial := a.prepare(ctx, call)
 		if denial != nil {
-			message := a.finalize(ctx, call, *denial, 0, false)
+			stopped := ctx.Err() != nil
+			message := a.finalize(ctx, call, *denial, 0, stopped)
 			messages[i] = message
-			emitEnd(em, call, *denial, 0)
+			emitEnd(em, call, *denial, 0, stopped)
 			continue
 		}
 		jobs = append(jobs, job{index: i, impl: impl, call: call})
@@ -116,7 +118,7 @@ func (a *Agent) dispatchParallel(ctx context.Context, calls []wire.Content, em *
 				// fact a result that was cut off records.
 				result := interruptedResult(nil)
 				messages[entry.index] = a.finalize(ctx, entry.call, result, 0, true)
-				emitEnd(em, entry.call, result, 0)
+				emitEnd(em, entry.call, result, 0, true)
 				return
 			}
 
@@ -125,7 +127,7 @@ func (a *Agent) dispatchParallel(ctx context.Context, calls []wire.Content, em *
 			duration := time.Since(start)
 			messages[entry.index] = a.finalize(ctx, entry.call, result, duration, stopped)
 			terminates[entry.index] = result.Terminate
-			emitEnd(em, entry.call, result, duration)
+			emitEnd(em, entry.call, result, duration, stopped)
 		}(entry)
 	}
 	wg.Wait()
@@ -142,6 +144,10 @@ func (a *Agent) dispatchParallel(ctx context.Context, calls []wire.Content, em *
 // prepare resolves a call to an executable tool, or returns the error result
 // that replaces execution.
 func (a *Agent) prepare(ctx context.Context, call tool.Call) (tool.Tool, *tool.Result) {
+	if ctx.Err() != nil {
+		result := interruptedResult(nil)
+		return nil, &result
+	}
 	impl, ok := a.registry.Get(call.Name)
 	if !ok {
 		result := errorResult(fmt.Sprintf("Tool %q not found", call.Name))
@@ -149,6 +155,10 @@ func (a *Agent) prepare(ctx context.Context, call tool.Call) (tool.Tool, *tool.R
 	}
 	if a.cfg.BeforeToolCall != nil {
 		decision, err := a.cfg.BeforeToolCall(ctx, call)
+		if ctx.Err() != nil {
+			result := interruptedResult(nil)
+			return nil, &result
+		}
 		if err != nil {
 			result := errorResult(err.Error())
 			return nil, &result
@@ -171,6 +181,9 @@ func (a *Agent) prepare(ctx context.Context, call tool.Call) (tool.Tool, *tool.R
 // killed halfway through a file is not the same thing as a call that never ran,
 // and the only place that difference can be recorded is the result.
 func (a *Agent) execute(ctx context.Context, impl tool.Tool, call tool.Call, em *emitter) (tool.Result, bool) {
+	if ctx.Err() != nil {
+		return interruptedResult(nil), true
+	}
 	var last *tool.Partial
 	result, err := impl.Execute(ctx, call, func(partial tool.Partial) {
 		last = &partial
@@ -250,7 +263,7 @@ func startEvent(call tool.Call) wire.AgentEvent {
 	}
 }
 
-func emitEnd(em *emitter, call tool.Call, result tool.Result, duration time.Duration) {
+func emitEnd(em *emitter, call tool.Call, result tool.Result, duration time.Duration, stopped bool) {
 	event := wire.AgentEvent{
 		Type:       wire.AgentEventToolExecEnd,
 		ToolCallID: call.ID,
@@ -260,6 +273,9 @@ func emitEnd(em *emitter, call tool.Call, result tool.Result, duration time.Dura
 	}
 	if duration > 0 {
 		event.DurationMs = wire.Ptr(duration.Milliseconds())
+	}
+	if stopped {
+		event.Aborted = wire.Ptr(true)
 	}
 	em.emit(event)
 }

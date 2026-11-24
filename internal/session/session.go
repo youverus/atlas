@@ -466,6 +466,8 @@ func (m *Manager) AppendUsage(kind, provider, model string, usage json.RawMessag
 type CompactionOptions struct {
 	Details  json.RawMessage
 	Usage    json.RawMessage
+	Provider string
+	Model    string
 	FromHook *bool
 }
 
@@ -484,6 +486,8 @@ func (m *Manager) AppendCompaction(summary, firstKeptEntryID string, tokensBefor
 		TokensBefore:     json.Number(fmt.Sprintf("%d", tokensBefore)),
 		Details:          options.Details,
 		Usage:            options.Usage,
+		Provider:         options.Provider,
+		Model:            options.Model,
 		FromHook:         options.FromHook,
 		ParentID:         cloneID(m.leafID),
 		Timestamp:        formatTimestamp(m.clock()),

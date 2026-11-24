@@ -1,7 +1,9 @@
 package tui
 
 import (
+	"slices"
 	"strings"
+	"unicode"
 
 	"charm.land/lipgloss/v2"
 )
@@ -17,12 +19,27 @@ type Composer struct {
 	buf []rune
 	cur int
 
-	history []string
-	// hist is the history index being browsed, or -1 while the live buffer is
-	// being edited. draft keeps that buffer aside so moving away and back does
-	// not lose a half-typed line.
+	images  []imagePick
+	history []composerDraft
+	// hist is -1 while editing the live draft. Keep it aside when browsing history.
 	hist  int
-	draft []rune
+	draft composerDraft
+}
+
+// Prompt is the submitted text and the images explicitly selected in it.
+type Prompt struct {
+	Text   string
+	Images []string
+}
+
+type composerDraft struct {
+	text   string
+	images []imagePick
+}
+
+type imagePick struct {
+	start, end int
+	path       string
 }
 
 // NewComposer returns an empty composer.
@@ -42,19 +59,13 @@ func (c *Composer) Len() int { return len(c.buf) }
 // Set replaces the buffer and puts the cursor at the end. History browsing is
 // cancelled: a seed is the new starting point, not a detour from the old one.
 func (c *Composer) Set(text string) {
-	c.buf = []rune(text)
-	c.cur = len(c.buf)
+	c.replace(composerDraft{text: text})
 	c.hist = -1
-	c.draft = nil
+	c.draft = composerDraft{}
 }
 
 // Clear empties the buffer.
-func (c *Composer) Clear() {
-	c.buf = c.buf[:0]
-	c.cur = 0
-	c.hist = -1
-	c.draft = nil
-}
+func (c *Composer) Clear() { c.Set("") }
 
 // Insert adds text at the cursor. A newline becomes a space: Enter submits, so
 // a multi-line paste has no way to stay multi-line here, and dropping the break
@@ -66,13 +77,35 @@ func (c *Composer) Insert(text string) {
 	text = strings.ReplaceAll(text, "\r\n", " ")
 	text = strings.ReplaceAll(text, "\n", " ")
 	text = strings.ReplaceAll(text, "\r", " ")
-	added := []rune(text)
-	buf := make([]rune, 0, len(c.buf)+len(added))
-	buf = append(buf, c.buf[:c.cur]...)
-	buf = append(buf, added...)
-	buf = append(buf, c.buf[c.cur:]...)
-	c.buf = buf
-	c.cur += len(added)
+	c.edit(c.cur, c.cur, []rune(text))
+}
+
+// edit shifts untouched selections and drops selections whose path was edited.
+func (c *Composer) edit(start, end int, text []rune) {
+	delta := len(text) - (end - start)
+	for i := 0; i < len(c.images); {
+		image := &c.images[i]
+		switch {
+		case image.start >= end:
+			image.start += delta
+			image.end += delta
+		case image.end > start:
+			c.images = slices.Delete(c.images, i, i+1)
+			continue
+		}
+		i++
+	}
+	c.buf = slices.Replace(c.buf, start, end, text...)
+	c.cur = start + len(text)
+	c.images = slices.DeleteFunc(c.images, func(image imagePick) bool {
+		return image.end < len(c.buf) && !unicode.IsSpace(c.buf[image.end]) ||
+			image.start > 0 && !referenceBoundary(c.buf[image.start-1])
+	})
+}
+
+// referenceBoundary permits a reference after whitespace or opening punctuation.
+func referenceBoundary(r rune) bool {
+	return unicode.IsSpace(r) || strings.ContainsRune("([{<\"'`=", r)
 }
 
 // Backspace deletes the rune before the cursor and reports whether it did.
@@ -80,8 +113,7 @@ func (c *Composer) Backspace() bool {
 	if c.cur == 0 {
 		return false
 	}
-	c.buf = append(c.buf[:c.cur-1], c.buf[c.cur:]...)
-	c.cur--
+	c.edit(c.cur-1, c.cur, nil)
 	return true
 }
 
@@ -90,7 +122,7 @@ func (c *Composer) Delete() bool {
 	if c.cur >= len(c.buf) {
 		return false
 	}
-	c.buf = append(c.buf[:c.cur], c.buf[c.cur+1:]...)
+	c.edit(c.cur, c.cur+1, nil)
 	return true
 }
 
@@ -118,6 +150,20 @@ func (c *Composer) Home() { c.cur = 0 }
 // End puts the cursor at the end.
 func (c *Composer) End() { c.cur = len(c.buf) }
 
+func (c *Composer) trimSpace() {
+	start, end := 0, len(c.buf)
+	for start < end && unicode.IsSpace(c.buf[start]) {
+		start++
+	}
+	for start < end && unicode.IsSpace(c.buf[end-1]) {
+		end--
+	}
+	c.edit(end, len(c.buf), nil)
+	c.edit(0, start, nil)
+	c.hist = -1
+	c.draft = composerDraft{}
+}
+
 // DeleteWord removes the word before the cursor, which is the one editing
 // gesture worth having on a line people type shell commands into.
 func (c *Composer) DeleteWord() bool {
@@ -131,23 +177,28 @@ func (c *Composer) DeleteWord() bool {
 	if start == c.cur {
 		return false
 	}
-	c.buf = append(c.buf[:start], c.buf[c.cur:]...)
-	c.cur = start
+	c.edit(start, c.cur, nil)
 	return true
 }
 
-// Take returns the submitted line and empties the composer. Blank lines are not
-// submitted: they are the reader pressing Enter on an empty prompt.
-func (c *Composer) Take() (string, bool) {
+// Take returns the submitted prompt and empties the composer.
+func (c *Composer) Take() (Prompt, bool) {
 	line := strings.TrimRight(string(c.buf), " ")
 	if strings.TrimSpace(line) == "" {
-		return "", false
+		return Prompt{}, false
 	}
-	if len(c.history) == 0 || c.history[len(c.history)-1] != line {
-		c.history = append(c.history, line)
+	draft := composerDraft{text: line, images: slices.Clone(c.images)}
+	if n := len(c.history); n == 0 || c.history[n-1].text != line || !slices.Equal(c.history[n-1].images, draft.images) {
+		c.history = append(c.history, draft)
+	}
+	prompt := Prompt{Text: line}
+	for _, image := range draft.images {
+		if !slices.Contains(prompt.Images, image.path) {
+			prompt.Images = append(prompt.Images, image.path)
+		}
 	}
 	c.Clear()
-	return line, true
+	return prompt, true
 }
 
 // Previous walks back through the history.
@@ -156,7 +207,7 @@ func (c *Composer) Previous() bool {
 		return false
 	}
 	if c.hist == -1 {
-		c.draft = append([]rune(nil), c.buf...)
+		c.draft = composerDraft{text: c.String(), images: slices.Clone(c.images)}
 		c.hist = len(c.history) - 1
 	} else if c.hist > 0 {
 		c.hist--
@@ -178,15 +229,15 @@ func (c *Composer) Next() bool {
 		return true
 	}
 	c.hist = -1
-	c.buf = append([]rune(nil), c.draft...)
-	c.cur = len(c.buf)
-	c.draft = nil
+	c.replace(c.draft)
+	c.draft = composerDraft{}
 	return true
 }
 
-func (c *Composer) replace(text string) {
-	c.buf = []rune(text)
+func (c *Composer) replace(draft composerDraft) {
+	c.buf = []rune(draft.text)
 	c.cur = len(c.buf)
+	c.images = slices.Clone(draft.images)
 }
 
 // Lines renders the composer at width, each row prefixed by prefix. The prefix

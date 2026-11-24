@@ -50,7 +50,7 @@ type turnRunner func(ctx context.Context, run func(context.Context, func(wire.Ag
 // replCommand handles one slash command and reports whether the session should
 // end. An unknown command is an error, not a prompt: sending "/modle" to the
 // model would waste a turn and confuse the transcript.
-func replCommand(ctx context.Context, application *app.App, side *sideState, line string, model models, resume *sessionPicker, pick chooser, prompts *assembly.PromptSource, out io.Writer, render *renderer, servers mcpState, draft func(string), turn turnRunner) (bool, error) {
+func replCommand(ctx context.Context, application *app.App, side *sideState, line string, model models, resume *sessionPicker, pick chooser, prompts *assembly.PromptSource, out io.Writer, render *renderer, servers mcpState, turn turnRunner, images ...string) (bool, error) {
 	fields := strings.Fields(line)
 	// /skill:foo is the spelling people bring from other agents, and "unknown
 	// command" would read as "atlas has no skills". The hint comes before the
@@ -99,7 +99,7 @@ func replCommand(ctx context.Context, application *app.App, side *sideState, lin
 		if len(fields) == 2 && fields[1] == "off" {
 			return false, discardSide(application, side, out, render)
 		}
-		return false, openSide(ctx, application, side, strings.Join(fields[1:], " "), out, render)
+		return false, openSide(ctx, application, side, commandArg(strings.TrimSpace(line), fields[0]), out, render, images...)
 	case "/parent":
 		if side == nil {
 			return false, errors.New("/parent: no side conversation in this mode")
@@ -112,6 +112,8 @@ func replCommand(ctx context.Context, application *app.App, side *sideState, lin
 			return false, model.pick(application, pick, out)
 		}
 		return false, model.apply(application, strings.Join(fields[1:], " "), out)
+	case effortsTrigger:
+		return false, effortsCommand(application, fields[1:], pick, out)
 	case permissionTrigger:
 		return false, permissionCommand(side, fields[1:], pick, out)
 	case "/mcp":
@@ -128,6 +130,8 @@ func replCommand(ctx context.Context, application *app.App, side *sideState, lin
 			}
 		}
 		return false, servers.report(ctx, fields[1:], out)
+	case "/browser":
+		return false, browserCommand(ctx, fields[1:], out)
 	case "/skill":
 		return false, skillCommand(ctx, application, side, fields[1:], out, render)
 	case "/plugin":
@@ -194,7 +198,7 @@ func replCommand(ctx context.Context, application *app.App, side *sideState, lin
 	case "/delete":
 		return false, deleteSession(application, out)
 	case "/fork":
-		return false, forkCommand(application, strings.TrimSpace(strings.TrimPrefix(line, "/fork")), pick, draft, out)
+		return false, forkCommand(application, strings.TrimSpace(strings.TrimPrefix(line, "/fork")), pick, out)
 	case "/rename":
 		return false, renameSession(application, strings.Join(fields[1:], " "), out)
 	case "/export":
@@ -237,8 +241,10 @@ var commands = []command{
 	{"/btw", "[question|off]", "the same as /side"},
 	{"/parent", "", "return to the main conversation, keeping the side one"},
 	{"/model", "[<name>[:level]]", "switch model, or pick one from the list"},
+	{effortsTrigger, "[<level>]", "adjust thinking effort for the current model"},
 	{permissionTrigger, "[status|<mode>]", "show or switch how tool calls are approved"},
 	{"/mcp", "[<server>|login <server>]", "list the connected MCP servers and their tools, or authorize one"},
+	{"/browser", "[<url>|close <id|all>]", "inspect tabs or open a page in the managed Chromium browser"},
 	{"/skill", "[<name> [text]]", "list the installed skills, or load one and start a turn"},
 	{"/plugin", "", "list the installed plugins and what each one adds"},
 	{"/compact", "[note]", "summarize and drop older history"},
@@ -251,7 +257,7 @@ var commands = []command{
 	{"/archive", "", "hide this session from /resume and start a new one"},
 	{"/restore", "", "put an archived session back in /resume"},
 	{"/delete", "", "delete the archived session you are in"},
-	{"/fork", "[<number>]", "branch off one of your messages, or the whole conversation"},
+	{"/fork", "[<number>]", "branch off one of the agent's answers, or the whole conversation"},
 	{"/rename", "<name>", "set the session name"},
 	{"/export", "[<path>]", "write this session to a .md, .html or .jsonl file"},
 	{"/init", "", "write an AGENTS.md for this repository and read it now"},
@@ -324,7 +330,7 @@ func helpText() string {
 	// twice is which: the same key means two different things depending on
 	// whether one is running, and this block is where a reader looks to find
 	// that out rather than guess.
-	fmt.Fprintf(&b, "%s%s\n", strings.Repeat(" ", len(keys)), "Esc or Ctrl+C twice stops the turn")
+	fmt.Fprintf(&b, "%s%s\n", strings.Repeat(" ", len(keys)), "Esc or Ctrl+C stops the current turn")
 	fmt.Fprintf(&b, "%s%s\n", strings.Repeat(" ", len(keys)), "Ctrl+C on an idle prompt clears it; twice exits")
 	// The two gestures that are not keys at all, or not only keys: the mouse
 	// cannot be advertised in a key table, and a reader who does not know a
@@ -398,18 +404,18 @@ func reportFork(application *app.App, out io.Writer) {
 	fmt.Fprintf(out, "fork: %s (in memory)\n", manager.ID())
 }
 
-// forkCommand is /fork: branch the conversation at one of its prompts.
+// forkCommand is /fork: branch the conversation after one of its answers.
 //
 // With no argument it asks where, because that is the question the command is
 // for; a number answers it without the menu, which is what the printed table
 // tells a reader to type. The bare command used to mean "fork the whole branch",
 // and that is now the first row rather than a separate spelling: a fork point is
 // somewhere in the conversation, and the end of it is one of the points.
-func forkCommand(application *app.App, arg string, pick chooser, draft func(string), out io.Writer) error {
-	places := forkPlaces(application.ForkMessages())
+func forkCommand(application *app.App, arg string, pick chooser, out io.Writer) error {
+	places := forkPlaces(application.ForkPoints())
 	if len(places) == 1 {
-		// Nothing to choose between: the session holds no message to branch
-		// before, so the only point is the end of it. A menu of one row would
+		// Nothing to choose between: the session holds no answer to branch
+		// after, so the only point is the end of it. A menu of one row would
 		// ask a question with one answer.
 		return forkSession(application, out)
 	}
@@ -418,55 +424,52 @@ func forkCommand(application *app.App, arg string, pick chooser, draft func(stri
 			forkTable(places, out)
 			return nil
 		}
-		answer := pick(tui.PickRequest{Title: "fork before", Items: places})
+		answer := pick(tui.PickRequest{Title: "fork after", Items: places})
 		if !answer.Taken {
 			return nil
 		}
-		return forkAt(application, answer.Value, draft, out)
+		return forkAt(application, answer.Value, out)
 	}
 	index, err := strconv.Atoi(arg)
 	if err != nil || index < 0 || index >= len(places) {
 		return fmt.Errorf("/fork: no point %q; /fork lists them", arg)
 	}
-	return forkAt(application, places[index].Value, draft, out)
+	return forkAt(application, places[index].Value, out)
 }
 
-// forkAt swaps the session for one that ends before entryID. An empty entryID is
+// forkAt swaps the session for one that ends with entryID. An empty entryID is
 // the end of the conversation, which is what the first row names.
 //
-// The message that was branched off comes back as a draft: the reason to fork
-// in front of something is to say it differently, and retyping the sentence to
-// change one word in it is the work the command exists to save.
-func forkAt(application *app.App, entryID string, draft func(string), out io.Writer) error {
+// Nothing comes back to retype: the answer that was kept is already in the new
+// branch, and the next thing said is a new instruction rather than a rewritten
+// question. That is the difference from the old fork, which handed the prompt
+// back as a draft.
+func forkAt(application *app.App, entryID string, out io.Writer) error {
 	if entryID == "" {
 		return forkSession(application, out)
 	}
-	text, err := application.ForkAt(entryID)
-	if err != nil {
+	if err := application.ForkAt(entryID); err != nil {
 		return err
 	}
 	reportFork(application, out)
-	if draft != nil && text != "" {
-		draft(text)
-	}
 	return nil
 }
 
-// forkPlaces is what /fork offers: the whole conversation, then every message
-// the reader wrote. Only the prompts are points, which is not a limitation but
-// the shape of a branch — what a fork redecides is what was asked, and the
-// answers follow from that.
+// forkPlaces is what /fork offers: the whole conversation, then every answer
+// the agent gave. Only the answers are points, which is not a limitation but the
+// shape of a branch — what a fork continues from is what was just said, and the
+// next prompt follows from that.
 //
 // The first row carries an empty value, so "the end of the conversation" needs
 // no entry id of its own.
-func forkPlaces(messages []app.ForkMessage) []tui.Choice {
-	places := make([]tui.Choice, 0, len(messages)+1)
+func forkPlaces(answers []app.ForkPoint) []tui.Choice {
+	places := make([]tui.Choice, 0, len(answers)+1)
 	places = append(places, tui.Choice{
 		Label: "the whole conversation",
-		Note:  "fork after the last message",
+		Note:  "fork after the last answer",
 	})
-	for _, message := range messages {
-		places = append(places, tui.Choice{Value: message.EntryID, Label: preview(message.Text, 60)})
+	for _, answer := range answers {
+		places = append(places, tui.Choice{Value: answer.EntryID, Label: preview(answer.Text, 60)})
 	}
 	return places
 }

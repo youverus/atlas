@@ -202,6 +202,39 @@ func TestSideSharesToolsAndModel(t *testing.T) {
 	}
 }
 
+func TestOpenSideRefreshesItsPromptAndToolsOnNextTurn(t *testing.T) {
+	prov := faux.New(faux.Response{Text: "first"}, faux.Response{Text: "second"})
+	prompt := "base with enabled skill"
+	tools := []tool.Tool{echoTool{}}
+	application := newTestApp(t, newSession(t), prov, func(cfg *Config) {
+		cfg.SystemPrompt = func(string) (string, error) { return prompt, nil }
+		cfg.Tools = func(string) []tool.Tool { return tools }
+	})
+	side, err := application.BeginSide()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := side.Ask(t.Context(), wire.UserMessage("before change"), nil); err != nil {
+		t.Fatal(err)
+	}
+	prompt = "base only"
+	tools = nil
+	if _, err := side.Ask(t.Context(), wire.UserMessage("after change"), nil); err != nil {
+		t.Fatal(err)
+	}
+	calls := prov.Calls()
+	if len(calls) != 2 || !strings.Contains(calls[0].Messages[0].Text(), "enabled skill") || len(wire.CurrentTools(calls[0].Messages)) != 1 {
+		t.Fatalf("first side request did not include the starting prompt and tool: %+v", calls)
+	}
+	messages := calls[1].Messages
+	if !strings.Contains(messages[0].Text(), "base only") || strings.Contains(messages[0].Text(), "enabled skill") || len(wire.CurrentTools(messages)) != 0 {
+		t.Fatalf("second side request retained disabled capabilities: %+v", messages)
+	}
+	if len(messages) != 4 || messages[1].Text() != "before change" || messages[2].Text() != "first" {
+		t.Fatalf("side history was lost while refreshing: %+v", messages)
+	}
+}
+
 func TestSideReplacesMainSystemPrompt(t *testing.T) {
 	manager := newSession(t)
 	mustAppend(t, manager, wire.SystemMessage("prompt from the session"))

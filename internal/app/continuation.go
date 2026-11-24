@@ -96,6 +96,10 @@ func (a *App) Continue(ctx context.Context, emit func(wire.AgentEvent) error) (R
 		a.mu.Unlock()
 		return Result{}, ErrNothingToContinue
 	}
+	if err := a.applyPendingModelLocked(); err != nil {
+		a.mu.Unlock()
+		return Result{}, err
+	}
 	a.busy = true
 	a.mu.Unlock()
 

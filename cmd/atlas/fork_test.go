@@ -3,7 +3,8 @@ package main
 // A fork point is somewhere in the conversation, and the whole command is about
 // naming one: the menu, the printed table and the number after the name are
 // three ways to say the same thing. These tests are about all three, and about
-// the message coming back as a draft so the reader can say it differently.
+// the point being an answer rather than a prompt: a branch continues from what
+// the agent just said.
 
 import (
 	"bytes"
@@ -18,7 +19,7 @@ import (
 	"pi-go/internal/wire"
 )
 
-// forkable is a session with two prompts in it, which is the smallest
+// forkable is a session with two answered prompts in it, which is the smallest
 // conversation that has a middle to fork at.
 func forkable(t *testing.T) (*app.App, *session.Manager) {
 	t.Helper()
@@ -40,14 +41,14 @@ func forkable(t *testing.T) (*app.App, *session.Manager) {
 func TestForkWithNoMenuPrintsThePoints(t *testing.T) {
 	application, _ := forkable(t)
 	out := &bytes.Buffer{}
-	if err := forkCommand(application, "", nil, nil, out); err != nil {
+	if err := forkCommand(application, "", nil, out); err != nil {
 		t.Fatalf("ForkCommand: %v", err)
 	}
 	printed := out.String()
 	for _, want := range []string{
 		"0  the whole conversation",
-		"1  first question",
-		"2  second question",
+		"1  first answer",
+		"2  second answer",
 		"fork at one of them with /fork <number>",
 	} {
 		if !strings.Contains(printed, want) {
@@ -56,25 +57,24 @@ func TestForkWithNoMenuPrintsThePoints(t *testing.T) {
 	}
 }
 
-// TestForkNumberBranchesBeforeThatMessage: the number names a prompt, the new
-// session ends before it, and the prompt comes back as a draft.
-func TestForkNumberBranchesBeforeThatMessage(t *testing.T) {
+// TestForkNumberBranchesAfterThatAnswer: the number names an answer, and the new
+// session holds every message up to and including it.
+func TestForkNumberBranchesAfterThatAnswer(t *testing.T) {
 	application, manager := forkable(t)
 	oldID := manager.ID()
-	var drafted string
 
 	out := &bytes.Buffer{}
-	if err := forkCommand(application, "2", nil, func(text string) { drafted = text }, out); err != nil {
+	if err := forkCommand(application, "1", nil, out); err != nil {
 		t.Fatalf("ForkCommand: %v", err)
 	}
 	if manager.ID() == oldID {
-		t.Fatal("/fork 2 kept the session id")
+		t.Fatal("/fork 1 kept the session id")
 	}
 	if got := application.MessageCount(); got != 2 {
-		t.Fatalf("the fork holds %d messages, want the two before the second prompt", got)
+		t.Fatalf("the fork holds %d messages, want the first turn (prompt and answer)", got)
 	}
-	if drafted != "second question" {
-		t.Fatalf("the draft is %q, want the message that was branched off", drafted)
+	if got := application.Messages()[1].Text(); got != "first answer" {
+		t.Fatalf("the fork ends with %q, want the chosen answer", got)
 	}
 	if !strings.Contains(out.String(), "fork: "+manager.ID()) {
 		t.Fatalf("output = %q, want the new session id", out.String())
@@ -85,7 +85,7 @@ func TestForkNumberBranchesBeforeThatMessage(t *testing.T) {
 // like any other, so it needs no spelling of its own.
 func TestForkZeroTakesTheWholeConversation(t *testing.T) {
 	application, _ := forkable(t)
-	if err := forkCommand(application, "0", nil, nil, &bytes.Buffer{}); err != nil {
+	if err := forkCommand(application, "0", nil, &bytes.Buffer{}); err != nil {
 		t.Fatalf("ForkCommand: %v", err)
 	}
 	if got := application.MessageCount(); got != 4 {
@@ -97,31 +97,30 @@ func TestForkZeroTakesTheWholeConversation(t *testing.T) {
 // and the row the reader takes is the point.
 func TestForkMenuTakesTheChosenPoint(t *testing.T) {
 	application, _ := forkable(t)
-	messages := application.ForkMessages()
-	if len(messages) != 2 {
-		t.Fatalf("the session reports %d prompts, want two", len(messages))
+	points := application.ForkPoints()
+	if len(points) != 2 {
+		t.Fatalf("the session reports %d answers, want two", len(points))
 	}
 	var asked tui.PickRequest
 	taken := chooser(func(req tui.PickRequest) tui.PickAnswer {
 		asked = req
-		return tui.PickAnswer{Taken: true, Value: messages[1].EntryID}
+		return tui.PickAnswer{Taken: true, Value: points[0].EntryID}
 	})
-	var drafted string
 
-	if err := forkCommand(application, "", taken, func(text string) { drafted = text }, &bytes.Buffer{}); err != nil {
+	if err := forkCommand(application, "", taken, &bytes.Buffer{}); err != nil {
 		t.Fatalf("ForkCommand: %v", err)
 	}
-	if asked.Title != "fork before" {
+	if asked.Title != "fork after" {
 		t.Fatalf("the menu is titled %q", asked.Title)
 	}
 	if len(asked.Items) != 3 {
-		t.Fatalf("the menu offers %d rows, want the whole conversation and two prompts", len(asked.Items))
+		t.Fatalf("the menu offers %d rows, want the whole conversation and two answers", len(asked.Items))
 	}
 	if got := application.MessageCount(); got != 2 {
-		t.Fatalf("the fork holds %d messages, want the two before the chosen prompt", got)
+		t.Fatalf("the fork holds %d messages, want the first turn only", got)
 	}
-	if drafted != "second question" {
-		t.Fatalf("the draft is %q, want the chosen message", drafted)
+	if got := application.Messages()[1].Text(); got != "first answer" {
+		t.Fatalf("the fork ends with %q, want the chosen answer", got)
 	}
 }
 
@@ -133,7 +132,7 @@ func TestAClosedMenuLeavesTheSession(t *testing.T) {
 	declined := chooser(func(tui.PickRequest) tui.PickAnswer { return tui.PickAnswer{} })
 
 	out := &bytes.Buffer{}
-	if err := forkCommand(application, "", declined, nil, out); err != nil {
+	if err := forkCommand(application, "", declined, out); err != nil {
 		t.Fatalf("ForkCommand: %v", err)
 	}
 	if manager.ID() != oldID {
@@ -150,7 +149,7 @@ func TestForkRefusesAPointThatIsNotThere(t *testing.T) {
 	application, manager := forkable(t)
 	oldID := manager.ID()
 	for _, arg := range []string{"9", "-1", "two"} {
-		err := forkCommand(application, arg, nil, nil, &bytes.Buffer{})
+		err := forkCommand(application, arg, nil, &bytes.Buffer{})
 		if err == nil {
 			t.Fatalf("/fork %s was accepted", arg)
 		}
@@ -172,7 +171,7 @@ func TestForkOfNothingSaysSo(t *testing.T) {
 		t.Fatalf("create session: %v", err)
 	}
 	application := commandApp(t, manager, cwd)
-	err = forkCommand(application, "", nil, nil, &bytes.Buffer{})
+	err = forkCommand(application, "", nil, &bytes.Buffer{})
 	if err == nil {
 		t.Fatal("forking an empty session was allowed")
 	}

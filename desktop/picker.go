@@ -30,7 +30,7 @@ func (p *folderPicker) PickFolder() (string, error) {
 		CanChooseDirectories: true,
 		CanChooseFiles:       false,
 		CanCreateDirectories: true,
-		Title:                "添加项目",
-		ButtonText:           "添加",
+		Title:                "选择目录",
+		ButtonText:           "选择",
 	}).PromptForSingleSelection()
 }

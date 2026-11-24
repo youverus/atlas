@@ -1,0 +1,19 @@
+{
+  "manifest_version": 3,
+  "name": "Atlas",
+  "version": "0.1.0",
+  "description": "用本机 Atlas 内核在浏览器里提问、翻译与总结当前页面。",
+  "permissions": ["storage", "contextMenus", "sidePanel", "scripting", "activeTab"],
+  "host_permissions": ["http://127.0.0.1/*", "http://localhost/*"],
+  "background": { "service_worker": "background.js", "type": "module" },
+  "content_scripts": [
+    {
+      "matches": ["http://*/*", "https://*/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": { "default_title": "Atlas" },
+  "side_panel": { "default_path": "sidepanel.html" },
+  "options_ui": { "page": "options.html", "open_in_tab": true }
+}

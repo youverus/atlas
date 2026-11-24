@@ -120,6 +120,23 @@ func TestLoadRejectsOversizedFile(t *testing.T) {
 	}
 }
 
+func TestLoadBrowserConfig(t *testing.T) {
+	path := write(t, t.TempDir(), FileName, `{
+  "providers": {"local": {"api": "openai-completions", "models": [{"id": "m"}]}},
+  "browser": {"headless": true, "executable": "/usr/bin/chromium"}
+}`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Browser == nil || cfg.Browser.Headless == nil || !*cfg.Browser.Headless {
+		t.Fatalf("Browser = %+v, want headless=true", cfg.Browser)
+	}
+	if cfg.Browser.Executable != "/usr/bin/chromium" {
+		t.Fatalf("Executable = %q, want /usr/bin/chromium", cfg.Browser.Executable)
+	}
+}
+
 func TestValidateRejects(t *testing.T) {
 	cases := []struct {
 		name   string
@@ -419,6 +436,18 @@ func TestKeyPrefersTheEnvironment(t *testing.T) {
 	}
 	if key := (Provider{}).Key(); key != "" {
 		t.Fatalf("Key() = %q, want empty", key)
+	}
+
+	// Copy-pasted credentials often carry leading/trailing whitespace or newlines;
+	// whitespace-only env values must behave like an unset variable.
+	t.Setenv("ATLAS_TEST_KEY", "  \t\n")
+	padded := Provider{APIKey: "  sk-pasted\n", APIKeyEnv: " ATLAS_TEST_KEY "}
+	if key := padded.Key(); key != "sk-pasted" {
+		t.Fatalf("Key() = %q, want trimmed file key when env is blank", key)
+	}
+	t.Setenv("ATLAS_TEST_KEY", " sk-from-env \n")
+	if key := padded.Key(); key != "sk-from-env" {
+		t.Fatalf("Key() = %q, want trimmed env key", key)
 	}
 }
 

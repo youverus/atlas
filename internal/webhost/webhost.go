@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"pi-go/internal/assembly"
@@ -30,9 +31,11 @@ const maxFileBytes = 1 << 20
 
 // Host is the kernel behind a window.
 type Host struct {
-	kernel   *assembly.Kernel
-	projects *project.Store
-	side     sideTracker
+	kernel    *assembly.Kernel
+	projects  *project.Store
+	mu        sync.RWMutex
+	activeKey string
+	slots     map[string]*sessionSlot
 }
 
 // Options is what a window needs beyond the kernel.
@@ -53,12 +56,19 @@ func NewWith(kernel *assembly.Kernel, options Options) *Host {
 			file = filepath.Join(home, project.FileName)
 		}
 	}
-	return &Host{kernel: kernel, projects: project.Open(file)}
+	activeKey, slots := seedSlots(kernel)
+	return &Host{
+		kernel:    kernel,
+		projects:  project.Open(file),
+		activeKey: activeKey,
+		slots:     slots,
+	}
 }
 
-// root is the directory file reads are confined to.
-func (h *Host) root() string {
-	if h.kernel.Cwd != "" {
+// startupDir is the directory the kernel was assembled for, used as the rail's
+// persistent default project regardless of which session is currently open.
+func (h *Host) startupDir() string {
+	if h.kernel != nil && h.kernel.Cwd != "" {
 		return h.kernel.Cwd
 	}
 	directory, err := os.Getwd()
@@ -68,11 +78,22 @@ func (h *Host) root() string {
 	return directory
 }
 
+// root is the directory file reads are confined to: the conversation in view
+// when it has a working directory, falling back to the kernel's startup
+// directory.
+func (h *Host) root() string {
+	if cwd := h.SessionDirectory(); cwd != "" {
+		return cwd
+	}
+	return h.startupDir()
+}
+
 // Sessions lists conversations from the directory this kernel stores them in.
 // The current one is marked rather than filtered out: a picker that hides where
 // the reader already is makes switching back feel like opening a new file.
 func (h *Host) Sessions(archived bool) ([]httpapi.SessionInfo, error) {
-	manager := h.kernel.App.Session()
+	slot := h.activeSlot()
+	manager := slot.live.App.Session()
 	directory, cwd := manager.Dir(), manager.Cwd()
 	list := session.List
 	if archived {
@@ -90,75 +111,195 @@ func (h *Host) Sessions(archived bool) ([]httpapi.SessionInfo, error) {
 	return out, nil
 }
 
-// OpenSession switches to a conversation already on disk.
+// OpenSession switches the viewed conversation to path. In full assembly
+// builds, existing active/running session runtimes stay alive independently so
+// switching never interrupts a background turn.
 func (h *Host) OpenSession(path string) error {
-	return h.kernel.App.SwitchSession(path)
+	if !h.kernel.CanSpawnSessions() {
+		slot := h.activeSlot()
+		oldKey := h.activeKey
+		if err := slot.live.App.SwitchSessionLeavingArchived(path); err != nil {
+			return err
+		}
+		h.mu.Lock()
+		h.rekeyActiveSlotLocked(oldKey, slot)
+		h.mu.Unlock()
+		return nil
+	}
+
+	h.mu.Lock()
+	if key, existing, ok := h.findSlotKeyLocked(path); ok && existing != nil {
+		h.pruneEmptySlotsLocked(key)
+		h.activeKey = key
+		h.mu.Unlock()
+		return nil
+	}
+	h.mu.Unlock()
+
+	live, err := h.kernel.OpenLiveSession(path, "")
+	if err != nil {
+		return err
+	}
+	h.activateSlot(live)
+	return nil
 }
 
-// NewSession starts an empty conversation.
+// NewSession starts an empty conversation in the viewed session's directory,
+// leaving any running sessions running in the background.
 func (h *Host) NewSession() error {
-	return h.kernel.App.NewSession()
+	if !h.kernel.CanSpawnSessions() {
+		slot := h.activeSlot()
+		oldKey := h.activeKey
+		if err := slot.live.App.NewSessionLeavingArchived(); err != nil {
+			return err
+		}
+		h.mu.Lock()
+		h.rekeyActiveSlotLocked(oldKey, slot)
+		h.mu.Unlock()
+		return nil
+	}
+
+	cwd := h.SessionDirectory()
+	live, err := h.kernel.OpenLiveSession("", cwd)
+	if err != nil {
+		return err
+	}
+	h.activateSlot(live)
+	return nil
 }
 
-// ForkPoints lists where the conversation in view can be branched: the end of
-// it first, then every prompt in the order it was said.
-//
-// The end is a row rather than a separate command because it is a point like
-// any other — the terminal's /fork menu puts it first for the same reason. The
-// numbering starts at zero there and at one on the messages, so the row number
-// the reader sees is the one the terminal's table prints.
+// SessionArchived reports whether the conversation currently in view is archived.
+func (h *Host) SessionArchived() bool {
+	return h.activeSlot().live.App.Archived()
+}
+
+// SessionDirectory reports the working directory of the conversation in view.
+func (h *Host) SessionDirectory() string {
+	slot := h.activeSlot()
+	if slot == nil || slot.live == nil || slot.live.App == nil || slot.live.App.Session() == nil {
+		return ""
+	}
+	return slot.live.App.Session().Cwd()
+}
+
+// SessionModel reports the active "provider/model" name in effect.
+func (h *Host) SessionModel() string {
+	model := h.activeSlot().live.App.Model()
+	if model.ID == "" {
+		return ""
+	}
+	if model.Provider == "" {
+		return model.ID
+	}
+	return model.Provider + "/" + model.ID
+}
+
+// ReloadConfig re-reads config.json and permission rules into all live sessions.
+func (h *Host) ReloadConfig() error {
+	h.mu.RLock()
+	targets := make([]*assembly.LiveSession, 0, len(h.slots))
+	for _, slot := range h.slots {
+		if slot != nil && slot.live != nil {
+			targets = append(targets, slot.live)
+		}
+	}
+	h.mu.RUnlock()
+	return h.kernel.ReloadSessions(targets...)
+}
+
 func (h *Host) ForkPoints() []httpapi.ForkPoint {
-	messages := h.kernel.App.ForkMessages()
-	points := make([]httpapi.ForkPoint, 0, len(messages)+1)
+	answers := h.activeSlot().live.App.ForkPoints()
+	points := make([]httpapi.ForkPoint, 0, len(answers)+1)
 	points = append(points, httpapi.ForkPoint{Index: 0})
-	for index, message := range messages {
+	for index, answer := range answers {
 		points = append(points, httpapi.ForkPoint{
-			EntryID: message.EntryID,
+			EntryID: answer.EntryID,
 			Index:   index + 1,
-			Text:    message.Text,
+			Turn:    answer.Turn,
+			Text:    answer.Text,
 		})
 	}
 	return points
 }
 
-// ForkSession branches the conversation and names the new session.
-//
-// The copy and the name are one call because they are one intention: a branch
-// nobody asked the name of would arrive in the rail under the name it copied,
-// and the reader would be looking at two rows that claim to be the same
-// conversation. The copy happens first, so a name that cannot be written leaves
-// a fork that exists — that is reported rather than hidden, because the
-// alternative is a session the reader can see but the window says it could not
-// make.
-//
-// An empty entryID branches at the end, which is the whole conversation; a
-// named one branches before that message and returns its text, because the
-// reason to fork in front of something is to say it differently.
-func (h *Host) ForkSession(entryID, name string) (string, error) {
-	text := ""
+func (h *Host) ForkSession(entryID, name string) error {
+	slot := h.activeSlot()
+	oldKey := sessionSlotKey(slot.live.App.Session().File())
 	if entryID == "" {
-		if _, err := h.kernel.App.ForkSession(); err != nil {
-			return "", err
+		if _, err := slot.live.App.ForkSession(); err != nil {
+			return err
 		}
-	} else {
-		forked, err := h.kernel.App.ForkAt(entryID)
-		if err != nil {
-			return "", err
-		}
-		text = forked
+	} else if err := slot.live.App.ForkAt(entryID); err != nil {
+		return err
 	}
 	name = strings.TrimSpace(name)
-	if name == "" {
-		return text, nil
+	if name != "" {
+		if err := slot.live.App.SetName(name); err != nil {
+			return fmt.Errorf("webhost: forked, but the new session could not be named: %w", err)
+		}
 	}
-	if err := h.kernel.App.SetName(name); err != nil {
-		return text, fmt.Errorf("webhost: forked, but the new session could not be named: %w", err)
+	if !h.kernel.CanSpawnSessions() {
+		h.mu.Lock()
+		h.rekeyActiveSlotLocked(oldKey, slot)
+		h.mu.Unlock()
+		return nil
 	}
-	return text, nil
+	// Detach the forked child into its own slot key while keeping the parent path
+	// clean so subsequent visits to the old conversation reload it from disk.
+	h.mu.Lock()
+	h.rekeyActiveSlotLocked(oldKey, slot)
+	h.mu.Unlock()
+	return nil
 }
 
-// ArchiveSession hides one conversation from the picker.
+// ArchiveSession hides one conversation from the picker. When the conversation
+// being archived is the one currently open, the host moves to a fresh empty
+// conversation so it does not remain parked on an archived record.
 func (h *Host) ArchiveSession(path string) error {
+	h.mu.Lock()
+	key, slot, found := h.findSlotKeyLocked(path)
+	isActive := found && key == h.activeKey
+	h.mu.Unlock()
+
+	if found && !isActive {
+		if slot.live != nil && slot.live.App != nil && slot.live.App.Busy() {
+			return fmt.Errorf("webhost: session %s is running", path)
+		}
+		if err := session.Archive(path); err != nil {
+			return err
+		}
+		h.mu.Lock()
+		delete(h.slots, key)
+		h.mu.Unlock()
+		return nil
+	}
+
+	if sameSessionFile(path, h.CurrentSession()) {
+		active := h.activeSlot()
+		if !h.kernel.CanSpawnSessions() {
+			oldKey := h.activeKey
+			if err := active.live.App.Archive(); err != nil {
+				return err
+			}
+			h.mu.Lock()
+			h.rekeyActiveSlotLocked(oldKey, active)
+			h.mu.Unlock()
+			return nil
+		}
+		cwd := active.live.App.Session().Cwd()
+		if err := active.live.App.Archive(); err != nil {
+			return err
+		}
+		fresh, err := h.kernel.OpenLiveSession("", cwd)
+		if err != nil {
+			return err
+		}
+		h.mu.Lock()
+		delete(h.slots, key)
+		h.mu.Unlock()
+		h.activateSlot(fresh)
+		return nil
+	}
 	return session.Archive(path)
 }
 
@@ -167,31 +308,96 @@ func (h *Host) RestoreSession(path string) error {
 	return session.Unarchive(path)
 }
 
-// DeleteSession removes the file behind a conversation. The kernel is refused
-// the delete of the session it is holding: removing the file under an open
-// manager would leave the window writing to a handle whose directory entry is
-// gone.
+// DeleteSession removes an archived conversation from disk. Unarchived
+// conversations are refused so deletion always passes through the archive
+// first. When the archived conversation being deleted is currently open in
+// view, the kernel deletes it and moves to a fresh empty conversation.
 func (h *Host) DeleteSession(path string) error {
-	if path == h.kernel.App.Session().File() {
-		return fmt.Errorf("webhost: refusing to delete the open session")
+	if !session.Archived(path) {
+		return fmt.Errorf("webhost: session %s is not archived", path)
+	}
+	h.mu.Lock()
+	key, slot, found := h.findSlotKeyLocked(path)
+	isActive := found && key == h.activeKey
+	h.mu.Unlock()
+
+	if sameSessionFile(path, h.CurrentSession()) {
+		active := h.activeSlot()
+		if !h.kernel.CanSpawnSessions() {
+			oldKey := h.activeKey
+			if err := active.live.App.Delete(); err != nil {
+				return err
+			}
+			h.mu.Lock()
+			h.rekeyActiveSlotLocked(oldKey, active)
+			h.mu.Unlock()
+			return nil
+		}
+		cwd := active.live.App.Session().Cwd()
+		if err := active.live.App.Delete(); err != nil {
+			return err
+		}
+		fresh, err := h.kernel.OpenLiveSession("", cwd)
+		if err != nil {
+			return err
+		}
+		h.mu.Lock()
+		delete(h.slots, key)
+		h.mu.Unlock()
+		h.activateSlot(fresh)
+		return nil
+	}
+	if found && !isActive && slot != nil {
+		if slot.live != nil && slot.live.App != nil && slot.live.App.Busy() {
+			return fmt.Errorf("webhost: session %s is running", path)
+		}
+		h.mu.Lock()
+		delete(h.slots, key)
+		h.mu.Unlock()
 	}
 	return session.DeleteFile(path)
 }
 
+func sameSessionFile(a, b string) bool {
+	if a == "" || b == "" {
+		return false
+	}
+	if filepath.Clean(a) == filepath.Clean(b) {
+		return true
+	}
+	left, errLeft := filepath.Abs(a)
+	right, errRight := filepath.Abs(b)
+	if errLeft == nil && errRight == nil && left == right {
+		return true
+	}
+	resolvedLeft, errLeft := filepath.EvalSymlinks(a)
+	resolvedRight, errRight := filepath.EvalSymlinks(b)
+	if errLeft == nil && errRight == nil {
+		return filepath.Clean(resolvedLeft) == filepath.Clean(resolvedRight)
+	}
+	return false
+}
+
 // Models reports the catalog plus what is in effect.
 func (h *Host) Models() (httpapi.ModelList, error) {
-	options := h.kernel.App.Models()
-	current := h.kernel.App.Model()
-	levels, _ := h.kernel.App.AvailableThinkingLevels()
+	active := h.activeSlot().live.App
+	options := active.Models()
+	current := active.Model()
+	levels, _ := active.AvailableThinkingLevels()
 	// A model with no reasoning axis has no level to report. Saying "medium"
 	// beside a name with no control to change it would be a setting the reader
 	// cannot act on, and the adapters send nothing for such a model anyway.
 	thinking := ""
 	if len(levels) > 0 {
-		thinking = h.kernel.App.ThinkingLevel()
+		thinking = active.ThinkingLevel()
+	}
+	pendingName := ""
+	if pending, ok := active.PendingModel(); ok && (pending.Provider != current.Provider || pending.ID != current.ID) {
+		pendingName = pending.Provider + "/" + pending.ID
 	}
 	list := httpapi.ModelList{
 		Current:  current.Provider + "/" + current.ID,
+		Pending:  pendingName,
 		Thinking: thinking,
 		Levels:   levels,
 		Models:   make([]httpapi.ModelOption, 0, len(options)),
@@ -212,13 +418,13 @@ func (h *Host) Models() (httpapi.ModelList, error) {
 
 // SetModel switches the model used by later turns.
 func (h *Host) SetModel(provider, id string) error {
-	_, err := h.kernel.App.SetModel(provider, id)
+	_, err := h.activeSlot().live.App.SetModel(provider, id)
 	return err
 }
 
 // SetThinking switches the reasoning level used by later turns.
 func (h *Host) SetThinking(level string) error {
-	return h.kernel.App.SetThinkingLevel(level)
+	return h.activeSlot().live.App.SetThinkingLevel(level)
 }
 
 // Permission reports the gate's posture and the four rows that describe it.
@@ -267,21 +473,34 @@ func (h *Host) SetPermission(mode string) error {
 
 // Stats totals the session.
 func (h *Host) Stats() (httpapi.Stats, error) {
-	stats, err := h.kernel.App.SessionStats()
+	active := h.activeSlot().live.App
+	stats, err := active.SessionStats()
 	if err != nil {
 		return httpapi.Stats{}, err
 	}
+	breakdown := h.kernel.InspectContext(h.root(), active.SystemPrompt())
 	out := httpapi.Stats{
-		SessionID:         stats.SessionID,
-		SessionFile:       stats.SessionFile,
-		UserMessages:      stats.UserMessages,
-		AssistantMessages: stats.AssistantMessages,
-		ToolCalls:         stats.ToolCalls,
-		TotalMessages:     stats.TotalMessages,
-		InputTokens:       int64(stats.Tokens.Input),
-		OutputTokens:      int64(stats.Tokens.Output),
-		TotalTokens:       int64(stats.Tokens.Total),
-		Cost:              stats.Cost,
+		SessionID:          stats.SessionID,
+		SessionFile:        stats.SessionFile,
+		UserMessages:       stats.UserMessages,
+		AssistantMessages:  stats.AssistantMessages,
+		ToolCalls:          stats.ToolCalls,
+		TotalMessages:      stats.TotalMessages,
+		InputTokens:        int64(stats.Tokens.Input),
+		OutputTokens:       int64(stats.Tokens.Output),
+		TotalTokens:        int64(stats.Tokens.Total),
+		Cost:               stats.Cost,
+		MCPServers:         breakdown.MCPServers,
+		MCPConfigured:      breakdown.MCPConfigured,
+		MCPTools:           breakdown.MCPTools,
+		MCPTokens:          breakdown.MCPTokens,
+		Skills:             breakdown.Skills,
+		SkillsTokens:       breakdown.SkillsTokens,
+		AgentsMDLoaded:     breakdown.AgentsMDLoaded,
+		ContextFiles:       breakdown.ContextFiles,
+		ContextFilesTokens: breakdown.ContextFilesTokens,
+		SystemPrompt:       breakdown.SystemPrompt,
+		SystemPromptTokens: breakdown.SystemPromptTokens,
 	}
 	if stats.ContextUsage != nil {
 		out.ContextWindow = stats.ContextUsage.ContextWindow
@@ -294,7 +513,7 @@ func (h *Host) Stats() (httpapi.Stats, error) {
 
 // ReadDir lists one directory below the working directory.
 func (h *Host) ReadDir(path string) (httpapi.DirListing, error) {
-	full, relative, err := h.resolve(path)
+	root, full, relative, err := h.resolve(path)
 	if err != nil {
 		return httpapi.DirListing{}, err
 	}
@@ -302,7 +521,7 @@ func (h *Host) ReadDir(path string) (httpapi.DirListing, error) {
 	if err != nil {
 		return httpapi.DirListing{}, err
 	}
-	listing := httpapi.DirListing{Path: relative, Entries: make([]httpapi.FileEntry, 0, len(entries))}
+	listing := httpapi.DirListing{Root: root, Path: relative, Entries: make([]httpapi.FileEntry, 0, len(entries))}
 	for _, entry := range entries {
 		name := entry.Name()
 		// Dotfiles stay hidden for the same reason a shell hides them: a
@@ -332,7 +551,7 @@ func (h *Host) ReadDir(path string) (httpapi.DirListing, error) {
 
 // ReadFile returns one file below the working directory.
 func (h *Host) ReadFile(path string) (httpapi.FileContent, error) {
-	full, relative, err := h.resolve(path)
+	_, full, relative, err := h.resolve(path)
 	if err != nil {
 		return httpapi.FileContent{}, err
 	}
@@ -370,19 +589,19 @@ func (h *Host) ReadFile(path string) (httpapi.FileContent, error) {
 
 // resolve turns a frontend path into an absolute one and refuses anything that
 // would leave the working directory.
-func (h *Host) resolve(path string) (string, string, error) {
+func (h *Host) resolve(path string) (string, string, string, error) {
 	root, err := filepath.Abs(h.root())
 	if err != nil {
-		return "", "", err
+		return "", "", "", err
 	}
 	relative, err := confine(root, path)
 	if err != nil {
-		return "", "", err
+		return "", "", "", err
 	}
 	if relative == "" {
-		return root, "", nil
+		return root, root, "", nil
 	}
-	return filepath.Join(root, filepath.FromSlash(relative)), relative, nil
+	return root, filepath.Join(root, filepath.FromSlash(relative)), relative, nil
 }
 
 // confine cleans a frontend path against a root and reports the relative form.

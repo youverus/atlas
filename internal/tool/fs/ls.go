@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
 	"sort"
 	"strings"
 
@@ -56,13 +55,16 @@ func (t lsTool) Execute(ctx context.Context, call tool.Call, onUpdate func(tool.
 	if request.Path != "" {
 		searchPath = request.Path
 	}
-	dirPath := t.set.resolve(searchPath)
+	dirPath, err := t.set.resolveAccess(searchPath)
+	if err != nil {
+		return tool.Result{}, err
+	}
 	limit := lsDefaultLimit
 	if request.Limit != nil {
 		limit = request.Limit.Int()
 	}
 
-	info, err := os.Stat(dirPath)
+	info, err := t.set.stat(dirPath)
 	if err != nil {
 		if isNotExist(err) {
 			return tool.Result{}, fmt.Errorf("Path not found: %s", dirPath)
@@ -73,7 +75,7 @@ func (t lsTool) Execute(ctx context.Context, call tool.Call, onUpdate func(tool.
 		return tool.Result{}, fmt.Errorf("Not a directory: %s", dirPath)
 	}
 
-	entries, err := os.ReadDir(dirPath)
+	entries, err := t.set.readDir(dirPath)
 	if err != nil {
 		return tool.Result{}, fmt.Errorf("Cannot read directory: %s", pathErrorText(err))
 	}
@@ -103,7 +105,7 @@ func (t lsTool) Execute(ctx context.Context, call tool.Call, onUpdate func(tool.
 			return tool.Result{}, err
 		}
 		suffix := ""
-		entryInfo, statErr := os.Stat(dirPath + string(os.PathSeparator) + name)
+		entryInfo, statErr := t.set.stat(joinAccessPath(dirPath, name))
 		if statErr != nil {
 			// Entries that cannot be stat'ed are dropped rather than guessed at.
 			continue

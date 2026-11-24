@@ -192,17 +192,25 @@ type sessionStatsResult struct {
 	ContextUsage      *contextUsageStats `json:"contextUsage,omitempty"`
 }
 
+// forkResult says the branch was made. Nothing is handed back with it: a fork
+// is taken after a reply, and that reply is in the new session already, so there
+// is no prompt to put in the input box.
 type forkResult struct {
-	Text      string `json:"text"`
-	Cancelled bool   `json:"cancelled"`
+	Cancelled bool `json:"cancelled"`
 }
 
 type cloneResult struct {
 	Cancelled bool `json:"cancelled"`
 }
 
+// forkMessageItem is one answer a session can be branched from. The name is
+// pi's command, but the rows are answers: atlas branches after a reply, not
+// before a prompt, so a caller asking what it can fork from gets replies.
+//
+// Turn counts prompts from 1, which is how a frontend groups them.
 type forkMessageItem struct {
 	EntryID string `json:"entryId"`
+	Turn    int    `json:"turn"`
 	Text    string `json:"text"`
 }
 

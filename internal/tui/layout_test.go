@@ -373,7 +373,7 @@ func withLayout(t *testing.T, change func(*Layout), styles Styles, suggest func(
 	t.Helper()
 	layout := DefaultLayout()
 	change(&layout)
-	m := New(Config{Styles: styles, Layout: layout, Suggest: suggest, Run: func(ctx context.Context, line string, sink Sink) error {
+	m := New(Config{Styles: styles, Layout: layout, Suggest: suggest, Run: func(ctx context.Context, prompt Prompt, sink Sink) error {
 		sink.Answer("the answer")
 		return nil
 	}})

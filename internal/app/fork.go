@@ -17,8 +17,9 @@ var (
 	// empty string and reads like a bug in the caller.
 	ErrNothingToFork = errors.New("app: nothing to fork (session is empty)")
 
-	// ErrInvalidForkEntry reports an entry id that does not name a user message
-	// in this session.
+	// ErrInvalidForkEntry reports an entry id that does not name an answer in
+	// this session: a branch is cut after a reply, and a reply is the only place
+	// a turn can be left without rewriting the question that opened it.
 	ErrInvalidForkEntry = errors.New("app: invalid entry id for forking")
 
 	// ErrSessionNotSaved reports a disk-backed session whose file has not been
@@ -27,9 +28,16 @@ var (
 	ErrSessionNotSaved = errors.New("app: session has not been saved yet")
 )
 
-// ForkMessage identifies one user message that a session can fork from.
-type ForkMessage struct {
+// ForkPoint identifies one answer a session can fork from, and the turn that
+// answer closed.
+//
+// Turn counts prompts from 1 along the active branch. The window groups its
+// transcript by prompt for the same reason, and the number is what lets a button
+// drawn under a reply find the entry behind it: the transcript the page holds
+// carries no entry ids of its own.
+type ForkPoint struct {
 	EntryID string
+	Turn    int
 	Text    string
 }
 
@@ -70,99 +78,129 @@ func (a *App) ForkSession() (string, error) {
 	return a.manager.ID(), nil
 }
 
-// ForkMessages returns every user message on the active branch with non-empty
-// text, in the order it was said, so a caller can choose a point to fork before.
+// ForkPoints returns every answer the conversation in view can be branched
+// from, in the order it was said.
+//
+// The answer rather than the prompt is where a branch belongs: a fork keeps
+// everything up to and including the reply the reader wants to build on, and
+// what they write next is a new instruction rather than a rewritten question.
+// That is also why the text is returned — a list of answers has to show them —
+// but nothing is handed back as a draft, because the reply itself is not
+// something to retype.
+//
+// One point per turn: the answer that closed it. An assistant message that still
+// holds tool calls is skipped, because a branch ending there would carry a call
+// with no result, and an earlier answer of the same turn is replaced by the one
+// that closed it.
 //
 // The branch rather than the file: a session can hold entries the current leaf
-// does not descend from, and a message the conversation in view no longer
-// contains is not a place it can be branched.
-func (a *App) ForkMessages() []ForkMessage {
+// does not descend from, and a reply the conversation in view no longer contains
+// is not a place it can be branched.
+func (a *App) ForkPoints() []ForkPoint {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
-	out := make([]ForkMessage, 0)
-	for _, entry := range a.manager.Path("") {
-		if entry.Type != session.TypeMessage {
-			continue
-		}
-		var probe struct {
-			Role    wire.Role        `json:"role"`
-			Content wire.ContentList `json:"content"`
-		}
-		if err := json.Unmarshal(entry.Message, &probe); err != nil {
-			continue
-		}
-		if probe.Role != wire.RoleUser {
-			continue
-		}
-		if text := forkMessageText(probe.Content); text != "" {
-			out = append(out, ForkMessage{EntryID: entry.ID, Text: text})
+	out := make([]ForkPoint, 0)
+	turn := 0
+	// The projected messages rather than the entries, because that is what the
+	// window draws: a compaction and a custom message both arrive as user
+	// messages, so counting entries would number the buttons against turns the
+	// reader cannot see. The source entry is still what a point names, since
+	// that is what a branch is cut at.
+	projection, err := a.manager.BuildProjection()
+	if err != nil {
+		return out
+	}
+	for _, projected := range projection.Entries {
+		entry := projected.Source
+		for _, message := range projected.Messages {
+			switch message.Role {
+			case wire.RoleUser:
+				// Only a prompt the window draws takes a number. The window
+				// skips a user message with neither text nor an image, and a
+				// turn nobody can see must not shift every button after it.
+				if promptVisible(message.Content) {
+					turn++
+				}
+			case wire.RoleAssistant:
+				if turn == 0 || entry.Type != session.TypeMessage {
+					continue
+				}
+				text := answerText(message.Content)
+				if text == "" {
+					continue
+				}
+				point := ForkPoint{EntryID: entry.ID, Turn: turn, Text: text}
+				// Two answers in one turn means the first was retried or failed.
+				// Keeping both would offer a fork point the conversation has
+				// already moved past.
+				if n := len(out); n > 0 && out[n-1].Turn == turn {
+					out[n-1] = point
+					continue
+				}
+				out = append(out, point)
+			}
 		}
 	}
 	return out
 }
 
-// ForkAt branches into a new session containing the history strictly before
-// entryID, which must identify a user message entry in this session, and returns
-// that message's text so the caller can prefill it for editing.
+// ForkAt branches into a new session holding the history up to and including
+// entryID, which must name an answer in this session.
 //
-// When entryID has no parent (it is the first entry in the session), the new
-// session starts empty with parentSession pointing at the original file; lazy
-// creation keeps it off disk until a new message arrives. Queues and any open
-// side conversation belong to the abandoned future and are discarded.
-func (a *App) ForkAt(entryID string) (string, error) {
+// Including rather than excluding is the whole point: a fork is taken after the
+// reply, so the branch continues from what the agent just said instead of
+// re-asking what it answered. Nothing is returned, because the reply that was
+// kept is already on screen in the new branch and there is no prompt to hand
+// back for editing.
+//
+// Queues and any open side conversation belong to the abandoned future and are
+// discarded.
+func (a *App) ForkAt(entryID string) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.busy {
-		return "", ErrBusy
+		return ErrBusy
 	}
 	if err := a.guardArchived(); err != nil {
-		return "", err
+		return err
 	}
 
 	selected, ok := a.manager.Entry(entryID)
 	if !ok || selected.Type != session.TypeMessage {
-		return "", ErrInvalidForkEntry
+		return ErrInvalidForkEntry
 	}
 	var probe struct {
 		Role    wire.Role        `json:"role"`
 		Content wire.ContentList `json:"content"`
 	}
-	if err := json.Unmarshal(selected.Message, &probe); err != nil || probe.Role != wire.RoleUser {
-		return "", ErrInvalidForkEntry
+	if err := json.Unmarshal(selected.Message, &probe); err != nil {
+		return ErrInvalidForkEntry
 	}
-	selectedText := forkMessageText(probe.Content)
+	if probe.Role != wire.RoleAssistant || answerText(probe.Content) == "" {
+		return ErrInvalidForkEntry
+	}
 
-	targetLeafID := selected.ParentID
-	if targetLeafID != nil {
-		if _, exists := a.manager.Entry(*targetLeafID); !exists {
-			return "", ErrInvalidForkEntry
-		}
-		if err := a.requireSaved(); err != nil {
-			return "", err
-		}
-		if _, err := a.manager.CreateBranchedSession(*targetLeafID); err != nil {
-			return "", err
-		}
-	} else {
-		previousFile := ""
-		if a.manager.Persisted() {
-			previousFile = a.manager.File()
-		}
-		if _, err := a.manager.NewSession(session.Options{ParentSession: previousFile}); err != nil {
-			return "", err
-		}
+	// The branch records this file as its parent, so the file has to exist: an
+	// assistant message implies a flushed session, but a caller can name an
+	// answer on a session whose write was lost.
+	if err := a.requireSaved(); err != nil {
+		return err
+	}
+	if _, err := a.manager.CreateBranchedSession(entryID); err != nil {
+		return err
 	}
 
 	a.resetQueuesAndSide()
 
 	projected, err := a.manager.BuildContext()
 	if err != nil {
-		return "", err
+		return err
 	}
 	a.model = a.baseModel
 	a.provider = a.baseProvider
 	a.thinking = a.baseThinking
+	a.pendingModel = nil
 	a.systemPrompt = a.baseSystemPrompt
 	a.promptSource = a.basePromptSource
 	a.restoreNote = ""
@@ -173,7 +211,7 @@ func (a *App) ForkAt(entryID string) (string, error) {
 	a.ag = a.buildAgent(a.systemPrompt, &a.steering, &a.followUps)
 	a.ag.SetMessages(projected.Messages)
 	a.messages = append([]wire.Message(nil), projected.Messages...)
-	return selectedText, nil
+	return nil
 }
 
 // CloneSession duplicates the active branch at the current leaf into a new
@@ -230,15 +268,43 @@ func (a *App) resetQueuesAndSide() {
 	a.followUps.setMode("")
 }
 
-// forkMessageText extracts user message text the way pi's contentText(..., "")
-// does: plain strings as-is, and text blocks joined without a separator.
-func forkMessageText(content wire.ContentList) string {
+// promptVisible reports whether a user message is drawn as a prompt at all. The
+// window drops one with no text and no image, so this has to drop the same ones:
+// otherwise the numbers the window counts and the numbers these points carry
+// would part company on a conversation that holds an image-only message.
+func promptVisible(content wire.ContentList) bool {
+	for _, block := range content.Items() {
+		switch block.Type {
+		case wire.ContentText:
+			if block.Text != "" {
+				return true
+			}
+		case wire.ContentImage:
+			return true
+		}
+	}
+	// A plain-string content is its own single text block.
+	return content.IsPlain() && content.PlainText() != ""
+}
+
+// answerText extracts what an answer said, or "" when the message cannot close
+// a turn.
+//
+// Plain strings pass through, and text blocks are joined without a separator the
+// way pi's contentText(..., "") does. A message holding a tool call answers ""
+// whatever else it contains: keeping the call without its result would leave the
+// branch in a state providers reject, and dropping the call would put words in
+// the agent's mouth.
+func answerText(content wire.ContentList) string {
 	if content.IsPlain() {
 		return content.PlainText()
 	}
 	var out strings.Builder
 	for _, block := range content.Items() {
-		if block.Type == wire.ContentText {
+		switch block.Type {
+		case wire.ContentToolCall:
+			return ""
+		case wire.ContentText:
 			out.WriteString(block.Text)
 		}
 	}

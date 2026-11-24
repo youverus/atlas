@@ -159,13 +159,20 @@ func TestRunReadsStdinWhenPiped(t *testing.T) {
 	cfgPath := writeConfig(t, openai.APIName, server.URL)
 
 	out, errOut := &bytes.Buffer{}, &bytes.Buffer{}
-	stdio := streams{in: strings.NewReader("from stdin"), out: out, err: errOut, terminal: false}
-	opts := options{configPath: cfgPath, workdir: t.TempDir(), sessionDir: filepath.Join(t.TempDir(), "s")}
+	cwd := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cwd, "input.txt"), []byte("stdin attachment sample"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stdio := streams{in: strings.NewReader("from stdin @input.txt"), out: out, err: errOut, terminal: false}
+	opts := options{configPath: cfgPath, workdir: cwd, sessionDir: filepath.Join(t.TempDir(), "s")}
 	if err := run(context.Background(), opts, stdio); err != nil {
 		t.Fatalf("run: %v", err)
 	}
 	if !strings.Contains(out.String(), "Hello world") {
 		t.Fatalf("stdout = %q", out.String())
+	}
+	if !bytes.Contains(server.body, []byte("stdin attachment sample")) {
+		t.Fatal("the stdin file reference was not expanded")
 	}
 }
 

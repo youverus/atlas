@@ -105,3 +105,31 @@ func Declaration(t Tool) wire.Tool {
 		Parameters:  t.Parameters(),
 	}
 }
+
+// SessionContext identifies the active conversation for session-scoped tools.
+type SessionContext struct {
+	ID   string
+	File string
+	Cwd  string
+}
+
+type sessionContextKey struct{}
+
+// WithSession attaches session metadata to ctx so session-scoped tools can
+// locate their per-conversation state even when a tool set is shared across
+// multiple live sessions in the same workspace.
+func WithSession(ctx context.Context, session SessionContext) context.Context {
+	return context.WithValue(ctx, sessionContextKey{}, session)
+}
+
+// SessionFromContext extracts the SessionContext attached by WithSession.
+func SessionFromContext(ctx context.Context) (SessionContext, bool) {
+	if ctx == nil {
+		return SessionContext{}, false
+	}
+	session, ok := ctx.Value(sessionContextKey{}).(SessionContext)
+	if !ok || (session.ID == "" && session.File == "" && session.Cwd == "") {
+		return SessionContext{}, false
+	}
+	return session, true
+}

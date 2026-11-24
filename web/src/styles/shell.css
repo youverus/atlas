@@ -21,6 +21,12 @@ body {
   overflow: hidden;
 }
 
+html.atlas-mac-vibrancy,
+html.atlas-mac-vibrancy body,
+html.atlas-mac-vibrancy #root {
+  background: transparent !important;
+}
+
 body {
   margin: 0;
   font-family: var(--font-sans);
@@ -59,18 +65,115 @@ button:disabled {
    desktop app read as a desktop app rather than as a web page in a frame. */
 .app {
   display: grid;
-  grid-template-columns: 264px minmax(0, 1fr);
+  /* The rail's width is the reader's, not this file's: --rail-width is written
+     onto this element by the page and defaults here, so a window that never
+     dragged anything is exactly the 264px it always was. */
+  grid-template-columns: var(--rail-width, 264px) minmax(0, 1fr);
   /* An implicit auto row would grow past the viewport whenever the chat column
      asks for more height than the window has, and the overflow then stretches
      the whole shell. Pinning the row to the container keeps the transcript the
      only thing that scrolls. */
   grid-template-rows: minmax(0, 1fr);
   height: 100%;
-  background: var(--fx-surface-main);
+  background: linear-gradient(155deg, #eceef3 0%, #e4e6ec 100%);
 }
 
-.app[data-rail="collapsed"] {
-  grid-template-columns: 0 minmax(0, 1fr);
+html.dark:not(.atlas-mac-vibrancy) .app {
+  background:
+    radial-gradient(circle at 10% 14%, rgba(56, 114, 214, 0.16), transparent 42%),
+    radial-gradient(circle at 90% 86%, rgba(120, 82, 200, 0.14), transparent 44%),
+    var(--fx-surface-canvas);
+}
+
+html.atlas-mac-vibrancy .app {
+  background: transparent;
+}
+
+.app:not([data-resizing="true"]) {
+  transition: grid-template-columns 220ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.app[data-rail-collapsed="true"] {
+  grid-template-columns: 0px minmax(0, 1fr);
+}
+
+.app[data-rail-collapsed="true"] .rail {
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transition: opacity 180ms ease, visibility 0s linear 220ms;
+}
+
+.app[data-rail-collapsed="true"] .rail__surface {
+  transform: translateX(-100%);
+}
+
+.app[data-resizing="true"] .rail__surface {
+  transition: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .app:not([data-resizing="true"]),
+  .rail,
+  .rail__surface,
+  .center-pane {
+    transition: none;
+  }
+}
+
+/* ---------- column resizer ---------- */
+
+/* 两根列的可拖边线。窄带绝对定位压在列自己的边线上：它因此不进网格，多一列少一列
+   都不用改这里的算术，而它又必须活着面板里面——有边的是面板。7px 是「点得中」与
+   「不挡住正文」之间的宽度，两根列的内边距都至少有 8px，所以这条带子里没有字。 */
+.resizer {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  z-index: 2;
+  width: 7px;
+  cursor: col-resize;
+  /* 触摸板上一次纵向滑动不该把拖动判成滚动。 */
+  touch-action: none;
+}
+
+.resizer--right {
+  right: 0;
+}
+
+.resizer--left {
+  left: 0;
+}
+
+/* 悬停与拖动时那条边线换成强调色：宽度在变的时候，眼睛得知道是哪条边在动。线宽不变
+   （始终 1px），只换颜色——变粗会让底下的内容跳一格。 */
+.resizer::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: transparent;
+  transition: background 120ms ease;
+}
+
+.resizer--right::after {
+  right: 0;
+}
+
+.resizer--left::after {
+  left: 0;
+}
+
+.resizer:hover::after,
+.resizer:active::after,
+.resizer:focus-visible::after {
+  background: var(--fx-accent-blue);
+}
+
+/* 焦点由那条线表示，不另画一圈：把手只有 7px 宽，环会长到面板里去。 */
+.resizer:focus-visible {
+  outline: none;
 }
 
 /* ---------- sidebar ---------- */
@@ -81,40 +184,40 @@ button:disabled {
   flex-direction: column;
   min-width: 0;
   overflow: hidden;
-  background: var(--fx-surface-sidebar);
-  border-right: 1px solid var(--fx-line-default);
+  background: var(--fx-surface-rail-glass-web);
+  backdrop-filter: blur(32px) saturate(175%);
+  -webkit-backdrop-filter: blur(32px) saturate(175%);
+  visibility: visible;
+  transition: opacity 180ms ease, visibility 0s;
+}
+
+.rail__surface {
+  display: flex;
+  flex-direction: column;
+  width: var(--rail-width, 264px);
+  height: 100%;
+  min-height: 0;
+  transform: translateX(0);
+  transition: transform 220ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+html.atlas-mac-vibrancy .rail {
+  background: var(--fx-surface-rail-glass);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
 }
 
 .rail__head {
   display: flex;
   align-items: center;
   gap: var(--space-2);
-  padding: var(--space-4) var(--space-3) var(--space-3);
-}
-
-.rail__brand {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  min-width: 0;
-  font-size: var(--text-body-lg);
-  font-weight: 600;
-  letter-spacing: 0.02em;
-  color: var(--fx-text-primary);
-}
-
-.rail__mark {
-  display: grid;
-  place-items: center;
-  width: 22px;
-  height: 22px;
-  border-radius: var(--radius-icon-box);
-  background: var(--fx-surface-inverse);
-  color: var(--fx-text-inverse);
-  font-size: var(--text-meta);
-  font-weight: 700;
-  letter-spacing: 0;
+  height: 44px;
+  padding: 0 var(--space-3);
   flex: none;
+}
+
+html.atlas-mac-desktop:not(.atlas-mac-fullscreen) .rail__head {
+  padding-left: 80px;
 }
 
 .rail__spacer {
@@ -130,14 +233,32 @@ button:disabled {
   color: var(--fx-text-secondary);
 }
 
-.icon-button:hover {
+.rail .icon-button:hover:not(:disabled),
+.drawer .icon-button:hover:not(:disabled),
+.side .icon-button:hover:not(:disabled) {
+  background: var(--fx-surface-sidebar-hover);
+  color: var(--fx-text-primary);
+}
+
+.icon-button:hover:not(:disabled) {
   background: var(--fx-surface-hover-overlay);
   color: var(--fx-text-primary);
+}
+
+.icon-button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 
 .icon-button[aria-pressed="true"] {
   background: var(--fx-surface-selected);
   color: var(--fx-text-primary);
+}
+
+.rail .icon-button[aria-pressed="true"],
+.drawer .icon-button[aria-pressed="true"],
+.side .icon-button[aria-pressed="true"] {
+  background: var(--fx-surface-sidebar-selected);
 }
 
 .rail__actions {
@@ -179,12 +300,18 @@ button:disabled {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: var(--space-2) var(--space-2) var(--space-1);
+  padding: var(--space-2) var(--space-1) var(--space-1) var(--space-2);
   font-size: var(--text-meta);
   font-weight: 500;
   color: var(--fx-text-tertiary);
   text-transform: uppercase;
   letter-spacing: 0.06em;
+}
+
+.rail__label-title {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
 }
 
 .rail__empty {
@@ -194,51 +321,262 @@ button:disabled {
 }
 
 .rail__foot {
-  padding: var(--space-2);
-  border-top: 1px solid var(--fx-line-default);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  padding: var(--space-1-5) var(--space-2);
+  border-top: 1px solid var(--fx-line-translucent);
 }
 
-/* The footer carries the build and the workspace, not an empty state: it shares
-   the muted step but not the padding the empty state puts around itself. */
-.rail__meta {
+.rail__settings-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1-5);
+  height: 28px;
+  padding: 0 var(--space-2-5);
+  border-radius: var(--radius-control);
   font-size: var(--text-label);
+  font-weight: 500;
+  color: var(--fx-text-secondary);
+  transition: background-color 140ms ease, color 140ms ease;
+}
+
+.rail__settings-btn:hover {
+  background: var(--fx-surface-sidebar-hover);
+  color: var(--fx-text-primary);
+}
+
+.rail__settings-btn[data-active="true"] {
+  background: var(--fx-accent-blue-soft);
+  color: var(--fx-accent-blue-text);
+}
+
+.rail__settings-glyph {
+  font-size: var(--text-body);
+  line-height: 1;
+}
+
+.rail__version {
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-size: var(--text-micro);
   color: var(--fx-text-tertiary);
   white-space: nowrap;
+}
+
+/* ---------- settings navigation in left rail ---------- */
+
+.settings-nav {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+
+.settings-nav__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  height: 44px;
+  padding: 0 var(--space-2-5);
+  border-bottom: 1px solid var(--fx-line-translucent);
+  flex: none;
+}
+
+html.atlas-mac-desktop:not(.atlas-mac-fullscreen) .settings-nav__head {
+  height: 82px;
+  padding-top: 38px;
+}
+
+.settings-nav__back {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1-5);
+  height: 28px;
+  padding: 0 var(--space-2);
+  border-radius: var(--radius-control);
+  font-size: var(--text-label);
+  font-weight: 500;
+  color: var(--fx-text-secondary);
+  transition: background-color 140ms ease, color 140ms ease;
+}
+
+.settings-nav__back:hover {
+  background: var(--fx-surface-sidebar-hover);
+  color: var(--fx-text-primary);
+}
+
+.settings-nav__heading {
+  font-size: var(--text-micro);
+  font-weight: 500;
+  color: var(--fx-text-tertiary);
+  letter-spacing: 0.04em;
+}
+
+.settings-nav__scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--space-2-5) var(--space-2);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.settings-nav__group {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.settings-nav__group-label {
+  padding: var(--space-1) var(--space-2);
+  font-size: var(--text-micro);
+  font-weight: 500;
+  color: var(--fx-text-tertiary);
+}
+
+.settings-nav__item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  width: 100%;
+  height: 32px;
+  padding: 0 var(--space-2-5);
+  border-radius: var(--radius-row);
+  font-size: var(--text-body);
+  font-weight: 500;
+  color: var(--fx-text-secondary);
+  text-align: left;
+  transition: background-color 140ms ease, color 140ms ease;
+}
+
+.settings-nav__item:hover {
+  background: var(--fx-surface-sidebar-hover);
+  color: var(--fx-text-primary);
+}
+
+.settings-nav__item[data-active="true"] {
+  background: var(--fx-surface-sidebar-selected);
+  color: var(--fx-text-primary);
+}
+
+.settings-nav__glyph {
+  width: 16px;
+  text-align: center;
+  font-size: var(--text-label);
+  color: var(--fx-text-tertiary);
+  flex: none;
+}
+
+.settings-nav__item[data-active="true"] .settings-nav__glyph {
+  color: var(--fx-accent-blue-text);
+}
+
+.settings-nav__label {
+  flex: 1;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings-nav__badge {
+  padding: 1px 6px;
+  border-radius: var(--radius-pill);
+  background: var(--fx-surface-sidebar-pill);
+  font-family: var(--font-mono);
+  font-size: var(--text-micro);
+  color: var(--fx-text-tertiary);
 }
 
 /* ---------- project group ---------- */
 
-/* One section per project. The head is a band rather than a row of the list:
-   it names a folder, it is not something to be read as a conversation. */
+/* One section per project. The head mirrors zcode's project row: open/closed folder
+   icon in a 16px leading column, followed by the project name aligned directly with
+   the session titles underneath (no vertical indent line or chat icons). */
 .project-group {
+  position: relative;
   margin-bottom: var(--space-2);
 }
 
 .project-group__head {
   display: flex;
   align-items: center;
-  gap: var(--space-1-5);
-  height: 26px;
+  gap: var(--space-1);
+  height: 32px;
   padding: 0 var(--space-1) 0 var(--space-2);
+  border-radius: var(--radius-row);
+  color: var(--fx-text-secondary);
+  transition: background-color 120ms ease, color 120ms ease;
+}
+
+.project-group__head:hover,
+.project-group__head[data-menu-open="true"] {
+  background: var(--fx-surface-sidebar-hover);
+  color: var(--fx-text-primary);
+}
+
+.project-group__toggle {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  color: inherit;
+  text-align: left;
+}
+
+.project-group__icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  flex: none;
+  color: var(--fx-text-tertiary);
+  transition: color 120ms ease;
+}
+
+.project-group__head:hover .project-group__icon,
+.project-group__head[data-menu-open="true"] .project-group__icon {
   color: var(--fx-text-secondary);
 }
 
 .project-group__name {
   min-width: 0;
   overflow: hidden;
-  font-size: var(--text-label);
-  font-weight: 600;
+  font-size: var(--text-body);
+  font-weight: 500;
   white-space: nowrap;
   text-overflow: ellipsis;
+}
+
+.project-group__count {
+  flex: none;
+  padding: 0 var(--space-1);
+  border-radius: var(--radius-xs);
+  background: var(--fx-surface-sidebar-pill);
+  font-family: var(--font-mono);
+  font-size: var(--text-micro);
+  color: var(--fx-text-tertiary);
+}
+
+.project-group__items {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding-top: 2px;
 }
 
 .project-group__tag {
   flex: none;
   padding: 1px var(--space-1-5);
   border-radius: var(--radius-xs);
-  background: var(--fx-surface-inset);
+  background: var(--fx-surface-sidebar-pill);
   font-size: var(--text-micro);
   color: var(--fx-text-tertiary);
 }
@@ -247,20 +585,40 @@ button:disabled {
   color: var(--fx-status-warning-text);
 }
 
+.project-group__tag[data-device-state="online"] {
+  color: var(--fx-status-success-text, var(--fx-accent-blue-text));
+}
+
+.project-group__empty--remote {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.project-group__actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex: none;
+}
+
 .project-group__action {
   flex: none;
   width: 20px;
   height: 20px;
   opacity: 0;
+  transition: opacity 120ms ease;
 }
 
-.project-group:hover .project-group__action,
+.project-group__head:hover .project-group__action,
+.project-group__head[data-menu-open="true"] .project-group__action,
 .project-group__action:focus-visible {
   opacity: 1;
 }
 
 .project-group__empty {
-  padding: var(--space-1) var(--space-2) var(--space-1);
+  padding: var(--space-1-5) var(--space-2) var(--space-1-5) calc(var(--space-2) + 16px + var(--space-2));
   font-size: var(--text-label);
   color: var(--fx-text-tertiary);
 }
@@ -271,46 +629,6 @@ button:disabled {
   position: relative;
 }
 
-/* The add-project row is the last line of the list, where a list the reader
-   builds grows. It is a row of that list, not a toolbar button. */
-.rail__add-project {
-  display: flex;
-  align-items: center;
-  gap: var(--space-1-5);
-  width: 100%;
-  height: 28px;
-  margin-top: var(--space-1);
-  padding: 0 var(--space-2);
-  border-radius: var(--radius-row);
-  color: var(--fx-text-tertiary);
-  font-size: var(--text-label);
-  text-align: left;
-}
-
-.rail__add-project:hover {
-  background: var(--fx-surface-hover-overlay);
-  color: var(--fx-text-body);
-}
-
-.rail__path-form {
-  display: flex;
-  gap: var(--space-1-5);
-  margin-top: var(--space-1);
-  padding: 0 var(--space-1);
-}
-
-.rail__path-input {
-  flex: 1;
-  min-width: 0;
-  height: 26px;
-  padding: 0 var(--space-2);
-  border: 1px solid var(--fx-line-default);
-  border-radius: var(--radius-xs);
-  background: var(--fx-surface-raised);
-  color: var(--fx-text-primary);
-  font-size: var(--text-label);
-}
-
 /* ---------- session row ---------- */
 
 .session-row {
@@ -318,18 +636,20 @@ button:disabled {
   align-items: center;
   gap: var(--space-2);
   width: 100%;
-  padding: var(--space-1-5) var(--space-2);
+  padding: var(--space-1-5) var(--space-1) var(--space-1-5) var(--space-2);
   border-radius: var(--radius-row);
   text-align: left;
   color: var(--fx-text-body);
+  transition: background-color 120ms ease, color 120ms ease;
 }
 
-.session-row:hover {
-  background: var(--fx-surface-hover-overlay);
+.session-row:hover,
+.session-row__slot[data-menu-open="true"] .session-row {
+  background: var(--fx-surface-sidebar-hover);
 }
 
 .session-row[data-current="true"] {
-  background: var(--fx-surface-selected);
+  background: var(--fx-surface-sidebar-selected);
   color: var(--fx-text-primary);
 }
 
@@ -341,6 +661,17 @@ button:disabled {
 
 .session-row--pending .session-row__meta {
   color: var(--fx-text-tertiary);
+}
+
+/* Leading 16px status slot aligned beneath the folder icon: empty when idle so
+   session titles align cleanly with the project name above. */
+.session-row__lead {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  flex: none;
 }
 
 /* The row's text is two spans inside a button. A span is inline by default and
@@ -379,11 +710,20 @@ button:disabled {
   border-radius: var(--radius-xs);
   color: var(--fx-text-tertiary);
   opacity: 0;
+  transition: opacity 120ms ease;
 }
 
 .session-row:hover .session-row__more,
+.session-row__slot[data-menu-open="true"] .session-row__more,
 .session-row__more:focus-visible {
   opacity: 1;
+}
+
+@media (hover: none) {
+  .project-group__action,
+  .session-row__more {
+    opacity: 1;
+  }
 }
 
 .session-row__more:hover {
@@ -391,14 +731,61 @@ button:disabled {
   color: var(--fx-text-primary);
 }
 
+.session-row__live {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: var(--radius-pill);
+  background: var(--fx-accent-blue);
+  box-shadow: 0 0 0 2px var(--fx-accent-blue-selection);
+  animation: session-live-pulse 1.5s ease-in-out infinite;
+}
+
+.session-row__live[data-state="approval"] {
+  background: var(--fx-status-warning);
+  box-shadow: 0 0 0 2px var(--fx-status-warning-soft);
+}
+
+@keyframes session-live-pulse {
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.45;
+    transform: scale(0.85);
+  }
+}
+
 /* ---------- main column ---------- */
 
 .main {
+  position: relative;
   display: flex;
   flex-direction: column;
   min-width: 0;
   min-height: 0;
+  overflow: hidden;
+  background: transparent;
+}
+
+.center-pane {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  margin: 6px 6px 6px 0;
+  border-radius: 12px;
+  border: 1px solid var(--fx-line-translucent);
   background: var(--fx-surface-main);
+  box-shadow: 0 2px 18px var(--fx-shadow-soft);
+  transition: margin-left 220ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.app[data-rail-collapsed="true"] .center-pane {
+  margin-left: 6px;
 }
 
 .topbar {
@@ -407,7 +794,19 @@ button:disabled {
   gap: var(--space-2);
   height: 44px;
   padding: 0 var(--space-3);
-  border-bottom: 1px solid var(--fx-line-default);
+  border-bottom: 1px solid var(--fx-line-subtle);
+  flex: none;
+}
+
+html.atlas-mac-desktop:not(.atlas-mac-fullscreen) .app[data-rail-collapsed="true"] .topbar {
+  padding-left: 80px;
+}
+
+.topbar__rail-toggle {
+  flex: none;
+}
+
+.rail__collapse-btn {
   flex: none;
 }
 
@@ -443,17 +842,59 @@ button:disabled {
   font-size: var(--text-meta);
   color: var(--fx-text-secondary);
   white-space: nowrap;
+  min-width: 0;
 }
 
-.chip--button:hover {
+.chip--fixed {
+  flex: none;
+}
+
+.chip__text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chip--button:hover:not(:disabled) {
   background: var(--fx-surface-raised-hover);
   color: var(--fx-text-primary);
+}
+
+.chip--button:disabled {
+  opacity: 0.45;
+  color: var(--fx-text-tertiary);
+  cursor: not-allowed;
 }
 
 .chip--accent {
   background: var(--fx-accent-blue-soft);
   color: var(--fx-accent-blue-text);
   box-shadow: none;
+}
+
+.chip--effort-peak {
+  background: linear-gradient(
+    90deg,
+    color-mix(in srgb, #38bdf8 18%, var(--fx-surface-raised)),
+    color-mix(in srgb, #8b5cf6 20%, var(--fx-surface-raised)),
+    color-mix(in srgb, #ec4899 20%, var(--fx-surface-raised)),
+    color-mix(in srgb, #f59e0b 20%, var(--fx-surface-raised)),
+    color-mix(in srgb, #38bdf8 18%, var(--fx-surface-raised))
+  );
+  background-size: 220% 100%;
+  color: var(--fx-text-primary);
+  font-weight: 600;
+  box-shadow: 0 0 0 1px color-mix(in srgb, #ec4899 38%, var(--fx-line-default));
+  animation: chip-peak-flow 3.2s linear infinite;
+}
+
+@keyframes chip-peak-flow {
+  0% {
+    background-position: 0% 50%;
+  }
+  100% {
+    background-position: 220% 50%;
+  }
 }
 
 /* A posture that stopped asking. It sits in the top bar all the time, so it is
@@ -478,17 +919,32 @@ button:disabled {
   flex: none;
 }
 
-.dot--off {
-  background: var(--fx-text-faint);
-}
-
 .dot--warn {
   background: var(--fx-status-warning);
+}
+
+.dot--danger {
+  background: var(--fx-status-danger);
 }
 
 @media (max-width: 720px) {
   .app {
     grid-template-columns: 0 minmax(0, 1fr);
+  }
+
+  .center-pane {
+    margin: 0;
+    border-radius: 0;
+    border: none;
+    box-shadow: none;
+  }
+
+  html.atlas-mac-desktop:not(.atlas-mac-fullscreen) .topbar {
+    padding-left: 80px;
+  }
+
+  .topbar__rail-toggle {
+    display: none;
   }
 }
 

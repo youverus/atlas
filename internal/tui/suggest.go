@@ -22,6 +22,8 @@ type Suggestion struct {
 	// "look at @mai" — so it carries the length of the token it would replace
 	// and leaves the words around it alone.
 	Replace int
+	// Path identifies a picked file on disk. It is empty for folders and roles.
+	Path string
 }
 
 // Label is the name and its argument, the left column of the list.

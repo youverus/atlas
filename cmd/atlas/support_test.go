@@ -62,7 +62,7 @@ func TestAskKeepsTheSessionWhenATurnIsCancelled(t *testing.T) {
 }
 
 func TestQuitIsNotACommand(t *testing.T) {
-	done, err := replCommand(context.Background(), nil, nil, "/quit", models{}, nil, nil, emptyPrompts(), io.Discard, nil, mcpState{}, nil, nil)
+	done, err := replCommand(context.Background(), nil, nil, "/quit", models{}, nil, nil, emptyPrompts(), io.Discard, nil, mcpState{}, nil)
 	if done {
 		t.Fatal("done = true, want /quit to stop being an exit")
 	}
@@ -70,7 +70,7 @@ func TestQuitIsNotACommand(t *testing.T) {
 		t.Fatalf("error = %v, want an unknown-command error", err)
 	}
 
-	if done, err := replCommand(context.Background(), nil, nil, "/exit", models{}, nil, nil, emptyPrompts(), io.Discard, nil, mcpState{}, nil, nil); err != nil || !done {
+	if done, err := replCommand(context.Background(), nil, nil, "/exit", models{}, nil, nil, emptyPrompts(), io.Discard, nil, mcpState{}, nil); err != nil || !done {
 		t.Fatalf("replCommand(/exit, mcpState{}, nil) = (%v, %v), want the exit", done, err)
 	}
 }

@@ -68,7 +68,7 @@ func runCommandWith(t *testing.T, application *app.App, prompts *assembly.Prompt
 	t.Helper()
 	out := &bytes.Buffer{}
 	render := newRenderer(out, out, false)
-	done, err := replCommand(context.Background(), application, nil, line, models{}, newSessionPicker(application, ""), nil, prompts, out, render, mcpState{}, nil, nil)
+	done, err := replCommand(context.Background(), application, nil, line, models{}, newSessionPicker(application, ""), nil, prompts, out, render, mcpState{}, nil)
 	if done {
 		t.Fatalf("%s ended the session", line)
 	}

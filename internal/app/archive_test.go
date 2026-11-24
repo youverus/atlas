@@ -212,10 +212,7 @@ func TestAnArchivedConversationRefusesEveryWrite(t *testing.T) {
 			_, err := application.ForkSession()
 			return err
 		}},
-		{"fork at", func() error {
-			_, err := application.ForkAt(entryID)
-			return err
-		}},
+		{"fork at", func() error { return application.ForkAt(entryID) }},
 		{"clone", func() error {
 			_, err := application.CloneSession()
 			return err
@@ -249,5 +246,77 @@ func TestAnArchivedConversationRefusesEveryWrite(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Clean(file)); err != nil {
 		t.Fatalf("the archived file is gone: %v", err)
+	}
+}
+
+func TestLeavingArchivedNavigationLeavesTheArchivedFileUntouched(t *testing.T) {
+	cwd := t.TempDir()
+	storeDir := t.TempDir()
+	otherDir := t.TempDir()
+	manager, err := session.Create(cwd, storeDir, session.Options{})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	application := newTestApp(t, manager, faux.New(faux.Response{Text: "answer"}), func(c *Config) {
+		c.SessionDir = func(dir string) (string, error) {
+			return filepath.Join(storeDir, filepath.Base(dir)), nil
+		}
+	})
+	seedConversation(t, application)
+	archivedFile := application.Session().File()
+	target := otherSession(t, application)
+	if err := application.Archive(); err != nil {
+		t.Fatalf("archive: %v", err)
+	}
+	before, err := os.ReadFile(archivedFile)
+	if err != nil {
+		t.Fatalf("read archived: %v", err)
+	}
+
+	if err := application.SwitchSession(archivedFile); err != nil {
+		t.Fatalf("open archived: %v", err)
+	}
+	if err := application.SwitchSessionLeavingArchived(target); err != nil {
+		t.Fatalf("switch leaving archived: %v", err)
+	}
+	if got := application.Session().File(); got != target {
+		t.Fatalf("file = %q, want %q", got, target)
+	}
+	if application.Archived() {
+		t.Fatal("still archived after switching to live target")
+	}
+
+	if err := application.SwitchSession(archivedFile); err != nil {
+		t.Fatalf("re-open archived: %v", err)
+	}
+	if err := application.NewSessionLeavingArchived(); err != nil {
+		t.Fatalf("new leaving archived: %v", err)
+	}
+	if application.Archived() {
+		t.Fatal("still archived after NewSessionLeavingArchived")
+	}
+
+	if err := application.SwitchSession(archivedFile); err != nil {
+		t.Fatalf("re-open archived: %v", err)
+	}
+	if err := application.NewSessionInLeavingArchived(otherDir); err != nil {
+		t.Fatalf("new in leaving archived: %v", err)
+	}
+	if application.Archived() {
+		t.Fatal("still archived after NewSessionInLeavingArchived")
+	}
+	if got := application.Session().Cwd(); got != otherDir {
+		t.Fatalf("cwd = %q, want %q", got, otherDir)
+	}
+
+	after, err := os.ReadFile(archivedFile)
+	if err != nil {
+		t.Fatalf("read archived after leaving: %v", err)
+	}
+	if string(before) != string(after) {
+		t.Fatal("archived file changed during navigation")
+	}
+	if !session.Archived(archivedFile) {
+		t.Fatal("archived marker disappeared")
 	}
 }

@@ -322,3 +322,59 @@ func TestAskStopsTheCall(t *testing.T) {
 		t.Fatalf("reason = %q, want an actionable refusal", reason)
 	}
 }
+
+func TestReloadUpdatesRulesAndOptionalMode(t *testing.T) {
+	initialStore := mustParse(t, `{
+		"version": 2,
+		"allow": [{"tool_name": "write"}]
+	}`)
+	engine := New(Options{
+		Mode:  ModeDefault,
+		Store: initialStore,
+	})
+	engine.AllowForSession("s1", "edit")
+	if err := engine.SetMode(ModeBypass); err != nil {
+		t.Fatalf("set mode: %v", err)
+	}
+
+	nextStore := mustParse(t, `{
+		"version": 2,
+		"deny": [{"tool_name": "write"}]
+	}`)
+	if err := engine.Reload(Options{Mode: ModeDefault, Store: nextStore}, false); err != nil {
+		t.Fatalf("reload without mode override: %v", err)
+	}
+	if got := engine.Mode(); got != ModeBypass {
+		t.Fatalf("mode = %q, want %q preserved when updateMode=false", got, ModeBypass)
+	}
+	if !engine.AllowedForSession("s1", "edit") {
+		t.Fatal("session approval was lost across reload")
+	}
+	writeCall := tool.Call{ID: "c1", Name: "write", Arguments: json.RawMessage(`{"path":"out.txt","content":"hi"}`)}
+	if d := engine.Decide(writeCall); d.Behavior != Deny {
+		t.Fatalf("write decision = %+v, want Deny from reloaded store", d)
+	}
+
+	if err := engine.Reload(Options{Mode: "invalid", Store: nextStore}, true); err == nil {
+		t.Fatal("reload accepted invalid mode when updateMode=true")
+	}
+	if err := engine.Reload(Options{Mode: ModeOff, Store: nextStore}, true); err != nil {
+		t.Fatalf("reload with mode override: %v", err)
+	}
+	if got := engine.Mode(); got != ModeOff {
+		t.Fatalf("mode = %q, want %q", got, ModeOff)
+	}
+
+	// Concurrent Decide and Reload must be race-free.
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for range 100 {
+			_ = engine.Decide(writeCall)
+		}
+	}()
+	for range 100 {
+		_ = engine.Reload(Options{Mode: ModeOff, Store: nextStore}, false)
+	}
+	<-done
+}

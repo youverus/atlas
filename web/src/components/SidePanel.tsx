@@ -1,5 +1,7 @@
 import { useEffect, useRef } from "react";
 import type { Block } from "../lib/fold";
+import type { PathCompletionScope } from "../lib/pathCompletion";
+import type { ResizeHandleProps } from "../lib/useColumnWidth";
 import { BlockView } from "./ChatWindow";
 import { Composer } from "./Composer";
 
@@ -20,14 +22,24 @@ export function SidePanel({
   blocks,
   inherited,
   running,
+  fileScope,
+  stopping,
   onAsk,
+  onStop,
   onClose,
+  resizer,
 }: {
   blocks: Block[];
   inherited: number;
   running: boolean;
+  fileScope?: PathCompletionScope;
+  stopping: boolean;
   onAsk: (text: string) => void;
+  onStop?: () => void;
   onClose: () => void;
+  /** 左边缘那根可拖的把手。宽度由页面持有（它要活过重新加载），面板只负责把它
+   *  摆在边上——两边都在读同一份宽度，没有第二份。 */
+  resizer: ResizeHandleProps;
 }) {
   const scroll = useRef<HTMLDivElement>(null);
   const pinned = useRef(true);
@@ -53,6 +65,7 @@ export function SidePanel({
 
   return (
     <section className="side" aria-label="侧对话">
+      <div className="resizer resizer--left" title="拖动改变面板宽度，双击复位" {...resizer} />
       <div className="drawer__head">
         <span className="drawer__title">侧对话</span>
         <span className="side__count" title="这个面板从主对话那儿读到的块数">
@@ -97,7 +110,10 @@ export function SidePanel({
         <Composer
           plain
           disabled={running}
-          placeholder="问点别的，不动主对话…"
+          fileScope={fileScope}
+          stopping={stopping}
+          onStop={onStop}
+          placeholder="问点别的…  @ 选文件"
           onSend={onAsk}
         />
       </div>

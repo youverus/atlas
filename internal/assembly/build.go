@@ -2,6 +2,8 @@ package assembly
 
 import (
 	"fmt"
+	"net/http"
+	"time"
 
 	"pi-go/internal/app"
 	"pi-go/internal/config"
@@ -26,7 +28,7 @@ func Build(selection config.Selection) (wire.Model, provider.Provider, error) {
 	if err != nil {
 		return wire.Model{}, nil, err
 	}
-	return ModelOf(selection), adapter, nil
+	return ModelOf(selection), provider.WithStreamIdleTimeout(adapter, 45*time.Second), nil
 }
 
 // ModelOf converts a declaration into the kernel descriptor.
@@ -58,10 +60,14 @@ func ModelOf(selection config.Selection) wire.Model {
 
 // EffectiveBaseURL is the endpoint a selection actually calls.
 func EffectiveBaseURL(selection config.Selection) string {
+	raw := selection.Provider.BaseURL
 	if selection.Model.BaseURL != "" {
-		return selection.Model.BaseURL
+		raw = selection.Model.BaseURL
 	}
-	return selection.Provider.BaseURL
+	if selection.Provider.API == anthropic.APIName {
+		return anthropic.NormalizeConfiguredBaseURL(raw)
+	}
+	return raw
 }
 
 // EffectiveUserAgent is the client identifier a selection sends: the model's
@@ -73,6 +79,13 @@ func EffectiveUserAgent(selection config.Selection) string {
 	}
 	return selection.Provider.UserAgent
 }
+
+var modelHTTPClient = func() *http.Client {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	// A silent endpoint must time out even when the turn has no deadline.
+	transport.ResponseHeaderTimeout = 2 * time.Minute
+	return &http.Client{Transport: transport}
+}()
 
 // adapterOf builds the wire adapter and attaches the credential.
 //
@@ -100,6 +113,7 @@ func adapterOf(selection config.Selection) (provider.Provider, error) {
 			ToolChoice:                      compat.ToolChoice,
 			SendStore:                       compat.SendStore,
 		})
+		adapter.Client = modelHTTPClient
 		return provider.WithAPIKey(adapter, key), nil
 	case anthropic.APIName:
 		adapter := anthropic.New(anthropic.Compat{
@@ -110,6 +124,7 @@ func adapterOf(selection config.Selection) (provider.Provider, error) {
 			StrictTools:      compat.StrictTools,
 			ToolChoice:       compat.ToolChoice,
 		})
+		adapter.Client = modelHTTPClient
 		return provider.WithAPIKey(adapter, key), nil
 	case responses.APIName:
 		adapter := responses.New(responses.Compat{
@@ -119,6 +134,7 @@ func adapterOf(selection config.Selection) (provider.Provider, error) {
 			Verbosity:   compat.Verbosity,
 			Truncation:  compat.Truncation,
 		})
+		adapter.Client = modelHTTPClient
 		return provider.WithAPIKey(adapter, key), nil
 	case google.APIName:
 		adapter := google.New(google.Compat{
@@ -126,11 +142,23 @@ func adapterOf(selection config.Selection) (provider.Provider, error) {
 			ThinkingDialect: compat.ThinkingDialect,
 			ToolChoice:      compat.ToolChoice,
 		})
+		adapter.Client = modelHTTPClient
 		return provider.WithAPIKey(adapter, key), nil
 	}
 	return nil, fmt.Errorf("provider %q declares api %q; this binary speaks %s, %s, %s and %s",
 		selection.ProviderName, selection.Provider.API,
 		openai.APIName, anthropic.APIName, responses.APIName, google.APIName)
+}
+
+// ValidateSelections checks that every declared provider and model in cfg can
+// be built into a live adapter and model descriptor.
+func ValidateSelections(cfg *config.Config) error {
+	for _, selection := range cfg.Selections() {
+		if _, _, err := Build(selection); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // ResolverFor builds the function the kernel calls when a session records a

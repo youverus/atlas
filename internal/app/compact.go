@@ -136,8 +136,10 @@ func (a *App) runCompaction(ctx context.Context, reason, instructions string, em
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if _, err := a.manager.AppendCompaction(result.Summary, result.FirstKeptEntryID, result.TokensBefore, session.CompactionOptions{
-		Details: details,
-		Usage:   usage,
+		Details:  details,
+		Usage:    usage,
+		Provider: summarizer.Model.Provider,
+		Model:    summarizer.Model.ID,
 	}); err != nil {
 		return wire.CompactionResult{}, err
 	}

@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"pi-go/internal/config"
@@ -64,11 +65,23 @@ func SkillLimits() skill.Limits {
 	return skill.Limits{MaxBytes: tool.DefaultMaxBytes, MaxLines: tool.DefaultMaxLines}
 }
 
-// AvailableSkills is the scan both halves of the feature run: the prompt block
-// and the command. One scan means the list a reader sees is the list the model
-// was given.
+// AvailableSkills scans the enabled skills for the model's prompt and commands.
 func AvailableSkills(cwd string) ([]skill.Skill, []string) {
-	return skill.Load(SkillRoots(cwd), SkillLimits())
+	settings, err := loadSkillSettings()
+	if err != nil {
+		return nil, []string{err.Error()}
+	}
+	found, notes := skill.Load(SkillRoots(cwd), SkillLimits())
+	found = slices.DeleteFunc(found, func(item skill.Skill) bool { return settings.DisabledSkills[item.Name] })
+	return found, notes
+}
+
+func loadSkillSettings() (config.CapabilitySettings, error) {
+	home, err := config.DefaultHome()
+	if err != nil {
+		return config.CapabilitySettings{}, err
+	}
+	return config.LoadCapabilities(home)
 }
 
 // SkillMessage is the request that loads a skill: the file, inside the two facts
@@ -90,4 +103,126 @@ func SkillMessage(found skill.Skill, body, args string) string {
 		b.WriteString(args)
 	}
 	return b.String()
+}
+
+// SkillRootInfo describes one scanned skill root directory.
+type SkillRootInfo struct {
+	Scope string
+	Dir   string
+}
+
+// SkillInfo is a plain metadata snapshot of one discovered skill.
+type SkillInfo struct {
+	Name        string
+	Description string
+	Path        string
+	Scope       string
+	Disabled    bool
+}
+
+// SkillsSnapshot describes all skills visible for a working directory along
+// with the scanned root paths and any scan/collision warnings.
+type SkillsSnapshot struct {
+	Cwd    string
+	Roots  []SkillRootInfo
+	Skills []SkillInfo
+	Notes  []string
+}
+
+// DescribeSkills scans skills visible to cwd and returns plain snapshot values.
+func DescribeSkills(cwd string) (SkillsSnapshot, error) {
+	settings, err := loadSkillSettings()
+	if err != nil {
+		return SkillsSnapshot{}, err
+	}
+	rawRoots := SkillRoots(cwd)
+	roots := make([]SkillRootInfo, 0, len(rawRoots))
+	for _, root := range rawRoots {
+		roots = append(roots, SkillRootInfo{
+			Scope: string(root.Scope),
+			Dir:   root.Dir,
+		})
+	}
+	found, notes := skill.Load(rawRoots, SkillLimits())
+	items := make([]SkillInfo, 0, len(found))
+	for _, s := range found {
+		item := skillInfoOf(s)
+		item.Disabled = settings.DisabledSkills[s.Name]
+		items = append(items, item)
+	}
+	return SkillsSnapshot{
+		Cwd:    cwd,
+		Roots:  roots,
+		Skills: items,
+		Notes:  notes,
+	}, nil
+}
+
+// SetSkillEnabled persists the user's setting for an installed skill.
+func SetSkillEnabled(cwd, name string, enabled bool) error {
+	found, err := findSkill(cwd, name)
+	if err != nil {
+		return err
+	}
+	home, err := config.DefaultHome()
+	if err != nil {
+		return err
+	}
+	return config.SaveSkillEnabled(home, found.Name, enabled)
+}
+
+// ReadSkillContent reads the SKILL.md body for the named skill visible in cwd.
+func ReadSkillContent(cwd, name string) (SkillInfo, string, error) {
+	found, err := findSkill(cwd, name)
+	if err != nil {
+		return SkillInfo{}, "", err
+	}
+	body, err := found.Text(SkillLimits())
+	if err != nil {
+		return SkillInfo{}, "", err
+	}
+	return skillInfoOf(found), body, nil
+}
+
+// BuildSkillPrompt constructs the formatted <skill ...> user prompt for name.
+func BuildSkillPrompt(cwd, name, args string) (string, error) {
+	settings, err := loadSkillSettings()
+	if err != nil {
+		return "", err
+	}
+	if target := strings.TrimSpace(name); settings.DisabledSkills[target] {
+		return "", fmt.Errorf("skill: %q is disabled", target)
+	}
+	found, err := findSkill(cwd, name)
+	if err != nil {
+		return "", err
+	}
+	body, err := found.Text(SkillLimits())
+	if err != nil {
+		return "", err
+	}
+	return SkillMessage(found, body, strings.TrimSpace(args)), nil
+}
+
+func findSkill(cwd, name string) (skill.Skill, error) {
+	target := strings.TrimSpace(name)
+	if target == "" {
+		return skill.Skill{}, fmt.Errorf("skill: empty skill name")
+	}
+	found, _ := skill.Load(SkillRoots(cwd), SkillLimits())
+	for _, candidate := range found {
+		if candidate.Name == target {
+			return candidate, nil
+		}
+	}
+	return skill.Skill{}, fmt.Errorf("skill: no skill named %q", target)
+}
+
+func skillInfoOf(s skill.Skill) SkillInfo {
+	return SkillInfo{
+		Name:        s.Name,
+		Description: s.Description,
+		Path:        s.Path,
+		Scope:       string(s.Scope),
+	}
 }

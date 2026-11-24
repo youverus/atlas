@@ -212,18 +212,47 @@ func (e *Engine) SetMode(mode string) error {
 	if !ValidMode(mode) {
 		return fmt.Errorf("permission: %q is not one of default, auto, bypassPermissions, off", mode)
 	}
-	if mode == "" {
-		mode = ModeDefault
-	}
+	mode = normalizeMode(mode)
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.mode = mode
 	return nil
 }
 
+// Reload updates the rule store, sandbox flags, classifier, and optionally the
+// active mode while preserving session-scoped tool approvals.
+func (e *Engine) Reload(opts Options, updateMode bool) error {
+	if updateMode && !ValidMode(opts.Mode) {
+		return fmt.Errorf("permission: %q is not one of default, auto, bypassPermissions, off", opts.Mode)
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.store = opts.Store
+	e.opts.SandboxEnabled = opts.SandboxEnabled
+	e.opts.AutoAllowBashIfSandboxed = opts.AutoAllowBashIfSandboxed
+	e.classifier = opts.Classifier
+	if updateMode {
+		e.mode = normalizeMode(opts.Mode)
+	}
+	return nil
+}
+
+func normalizeMode(mode string) string {
+	if mode == "" {
+		return ModeDefault
+	}
+	return mode
+}
+
+func (e *Engine) snapshot() (mode string, store *Store, sandboxEnabled, autoAllow bool, classifier Classifier) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.mode, e.store, e.opts.SandboxEnabled, e.opts.AutoAllowBashIfSandboxed, e.classifier
+}
+
 // DefaultCheckers returns the built-in checker table.
 //
-// Read-only tools (read, ls, find, grep, echo, websearch, webfetch) have no
+// Read-only tools (read, ls, find, grep, echo, deepseek_web_search, deepseek_web_fetch) have no
 // checker, so the ladder's final step allows them without asking. Mutating and
 // execution tools (bash, write, edit) register a checker that returns
 // Undecided, which makes the ladder ask in ModeDefault and allow in ModeBypass
@@ -233,9 +262,14 @@ func DefaultCheckers() map[string]Checker {
 		return CheckResult{Behavior: Undecided}, nil
 	}
 	return map[string]Checker{
-		"bash":  undecided,
-		"write": undecided,
-		"edit":  undecided,
+		"bash":             undecided,
+		"write":            undecided,
+		"edit":             undecided,
+		"browser_click":    undecided,
+		"browser_click_at": undecided,
+		"browser_type":     undecided,
+		"browser_press":    undecided,
+		"browser_scroll":   undecided,
 	}
 }
 
@@ -311,7 +345,8 @@ func (e *Engine) checkerFor(toolName string) (Checker, bool) {
 //  11. A tool with a checker that stayed undecided asks (unless bash is
 //     auto-allowed by an active sandbox); a tool with no checker is allowed.
 func (e *Engine) Decide(call tool.Call) Decision {
-	policy := policyFor(e.Mode())
+	mode, store, sandboxEnabled, autoAllowBash, _ := e.snapshot()
+	policy := policyFor(mode)
 
 	if policy == policyOff {
 		return Decision{
@@ -320,26 +355,26 @@ func (e *Engine) Decide(call tool.Call) Decision {
 		}
 	}
 
-	if e.store != nil && e.store.broken != nil {
+	if store != nil && store.broken != nil {
 		if policy == policyNever {
 			return Decision{
 				Behavior: Deny,
-				Reason:   fmt.Sprintf("permission rule store is unhealthy (%v); bypassPermissions refuses to run without rules", e.store.broken),
+				Reason:   fmt.Sprintf("permission rule store is unhealthy (%v); bypassPermissions refuses to run without rules", store.broken),
 			}
 		}
 		return Decision{
 			Behavior: Ask,
-			Reason:   fmt.Sprintf("permission rule store is unhealthy (%v); approval is required", e.store.broken),
+			Reason:   fmt.Sprintf("permission rule store is unhealthy (%v); approval is required", store.broken),
 		}
 	}
 
-	if rule, ok := e.store.matchWholeTool(call.Name, Deny); ok {
+	if rule, ok := store.matchWholeTool(call.Name, Deny); ok {
 		return Decision{
 			Behavior: Deny,
 			Reason:   fmt.Sprintf("denied by rule for %s", rule.ToolName),
 		}
 	}
-	if rule, ok := e.store.matchContent(call, Deny); ok {
+	if rule, ok := store.matchContent(call, Deny); ok {
 		return Decision{
 			Behavior: Deny,
 			Reason:   fmt.Sprintf("denied by %s rule %q for %s", rule.Matcher.Kind, rule.Matcher.Pattern, rule.ToolName),
@@ -362,8 +397,8 @@ func (e *Engine) Decide(call tool.Call) Decision {
 		return Decision{Behavior: Deny, Reason: reason}
 	}
 
-	bashAutoAllowed := call.Name == "bash" && e.opts.SandboxEnabled && e.opts.AutoAllowBashIfSandboxed
-	if rule, ok := e.store.matchWholeTool(call.Name, Ask); ok && !bashAutoAllowed {
+	bashAutoAllowed := call.Name == "bash" && sandboxEnabled && autoAllowBash
+	if rule, ok := store.matchWholeTool(call.Name, Ask); ok && !bashAutoAllowed {
 		return Decision{
 			Behavior: Ask,
 			Reason:   fmt.Sprintf("approval required by rule for %s", rule.ToolName),
@@ -385,7 +420,7 @@ func (e *Engine) Decide(call tool.Call) Decision {
 		return Decision{Behavior: Ask, Reason: reason}
 	}
 
-	if rule, ok := e.store.matchContent(call, Ask); ok {
+	if rule, ok := store.matchContent(call, Ask); ok {
 		return Decision{
 			Behavior: Ask,
 			Reason:   fmt.Sprintf("approval required by %s rule %q for %s", rule.Matcher.Kind, rule.Matcher.Pattern, rule.ToolName),
@@ -407,13 +442,13 @@ func (e *Engine) Decide(call tool.Call) Decision {
 		}
 	}
 
-	if rule, ok := e.store.matchWholeTool(call.Name, Allow); ok {
+	if rule, ok := store.matchWholeTool(call.Name, Allow); ok {
 		return Decision{
 			Behavior: Allow,
 			Reason:   fmt.Sprintf("allowed by rule for %s", rule.ToolName),
 		}
 	}
-	if rule, ok := e.store.matchContent(call, Allow); ok {
+	if rule, ok := store.matchContent(call, Allow); ok {
 		return Decision{
 			Behavior: Allow,
 			Reason:   fmt.Sprintf("allowed by %s rule %q for %s", rule.Matcher.Kind, rule.Matcher.Pattern, rule.ToolName),
@@ -501,10 +536,11 @@ func (e *Engine) Gate(ctx context.Context, call tool.Call, approve func(tool.Cal
 // when the classifier could not answer — every one of which leaves the ask with
 // the human.
 func (e *Engine) classify(ctx context.Context, call tool.Call, decision Decision) (Verdict, bool) {
-	if e.classifier == nil || e.Mode() != ModeAuto || !decision.Classifiable {
+	mode, _, _, _, classifier := e.snapshot()
+	if classifier == nil || mode != ModeAuto || !decision.Classifiable {
 		return Verdict{}, false
 	}
-	verdict, err := e.classifier.Classify(ctx, ClassifyRequest{
+	verdict, err := classifier.Classify(ctx, ClassifyRequest{
 		Tool:   call.Name,
 		Args:   string(call.Arguments),
 		Reason: decision.Reason,

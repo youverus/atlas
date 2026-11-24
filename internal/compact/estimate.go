@@ -84,14 +84,37 @@ func EstimateTokens(message wire.Message) int {
 			}
 		}
 		if len(message.ToolsAdded) > 0 {
-			// A tool declaration costs roughly its JSON size, and re-encoding it
-			// is cheap compared with the request it will be part of.
-			if encoded, err := json.Marshal(message.ToolsAdded); err == nil {
-				chars += len(encoded)
-			}
+			chars += toolsCharacters(message.ToolsAdded)
 		}
 	}
 	return tokensFor(chars)
+}
+
+// EstimateTextTokens estimates token count for plain text using the same
+// character-to-token ratio as EstimateTokens.
+func EstimateTextTokens(text string) int {
+	if text == "" {
+		return 0
+	}
+	return tokensFor(textCharacters(text))
+}
+
+// EstimateToolsTokens estimates token count for serialized tool declarations.
+func EstimateToolsTokens(tools []wire.Tool) int {
+	if len(tools) == 0 {
+		return 0
+	}
+	return tokensFor(toolsCharacters(tools))
+}
+
+func toolsCharacters(tools []wire.Tool) int {
+	// A tool declaration costs roughly its JSON size, and re-encoding it
+	// is cheap compared with the request it will be part of.
+	encoded, err := json.Marshal(tools)
+	if err != nil {
+		return 0
+	}
+	return len(encoded)
 }
 
 // EstimateContextTokens anchors the estimate on the last assistant usage record

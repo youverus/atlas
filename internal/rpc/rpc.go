@@ -391,16 +391,15 @@ func (s *Server) switchSession(cmd command) error {
 	return s.success(cmd.ID, cmd.Type, newSessionResult{Cancelled: false})
 }
 
-// fork branches before a user message entry into a new session and returns the
-// selected message text. Like new_session and switch_session, a running turn is
-// aborted and awaited first so it cannot append to the forked session.
+// fork branches after an answer entry into a new session. Like new_session and
+// switch_session, a running turn is aborted and awaited first so it cannot
+// append to the forked session.
 func (s *Server) fork(cmd command) error {
 	s.abort()
-	text, err := s.app.ForkAt(cmd.EntryID)
-	if err != nil {
+	if err := s.app.ForkAt(cmd.EntryID); err != nil {
 		return s.failure(cmd.ID, cmd.Type, forkErrorMessage(err))
 	}
-	return s.success(cmd.ID, cmd.Type, forkResult{Text: text, Cancelled: false})
+	return s.success(cmd.ID, cmd.Type, forkResult{Cancelled: false})
 }
 
 // clone duplicates the active branch at the current leaf into a new session.
@@ -412,11 +411,14 @@ func (s *Server) clone(cmd command) error {
 	return s.success(cmd.ID, cmd.Type, cloneResult{Cancelled: false})
 }
 
+// getForkMessages answers where this session can be branched. The command name
+// is pi's; the rows are answers, because a branch in atlas is taken after a
+// reply rather than before a prompt.
 func (s *Server) getForkMessages(cmd command) error {
-	raw := s.app.ForkMessages()
+	raw := s.app.ForkPoints()
 	messages := make([]forkMessageItem, 0, len(raw))
 	for _, item := range raw {
-		messages = append(messages, forkMessageItem{EntryID: item.EntryID, Text: item.Text})
+		messages = append(messages, forkMessageItem{EntryID: item.EntryID, Turn: item.Turn, Text: item.Text})
 	}
 	return s.success(cmd.ID, cmd.Type, forkMessagesResult{Messages: messages})
 }

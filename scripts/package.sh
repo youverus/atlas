@@ -211,10 +211,11 @@ for arch in "${ARCHES[@]}"; do
 	# the SDK stamps the C ones at the SDK version, and ld warns once per object
 	# ("built for newer 'macOS' version than being linked") — harmless, since
 	# only the linked minos is enforced, but it buries a clean build in noise.
+	# Enable private_mac_apis so WKWebView draws transparent over MacBackdropTranslucent.
 	CGO_ENABLED=1 GOARCH="$arch" \
 		CGO_CFLAGS="-mmacosx-version-min=$MIN_MACOS" \
 		CGO_OBJCFLAGS="-mmacosx-version-min=$MIN_MACOS" \
-		go build -trimpath -ldflags "$LDFLAGS" -o "$out" .
+		go build -tags private_mac_apis -trimpath -ldflags "$LDFLAGS" -o "$out" .
 	ok "built $arch ($(du -h "$out" | awk '{print $1}'))"
 	BINARIES+=("$out")
 done
@@ -272,8 +273,8 @@ cat >"$APP/Contents/Info.plist" <<PLIST
 	<key>CFBundleDevelopmentRegion</key><string>zh_CN</string>
 	<key>CFBundleExecutable</key><string>$BINARY</string>
 	<key>CFBundleIdentifier</key><string>$BUNDLE_ID</string>
-	<key>CFBundleName</key><string>$APP_NAME</string>
-	<key>CFBundleDisplayName</key><string>$APP_NAME</string>
+	<key>CFBundleName</key><string>Atlas</string>
+	<key>CFBundleDisplayName</key><string>Atlas</string>
 	<key>CFBundlePackageType</key><string>APPL</string>
 	<key>CFBundleShortVersionString</key><string>$VERSION</string>
 	<key>CFBundleVersion</key><string>$VERSION</string>

@@ -16,9 +16,10 @@ import (
 // what tells it that a result is data rather than orders. The operator list is
 // here because the model cannot guess that this endpoint understands site: and
 // would otherwise burn calls on queries a search engine answers ordinally.
-const searchDescription = `Search the live web and return ranked results. ` +
+const searchDescription = `Search the live web via DeepSeek's web search endpoint and return ranked results. ` +
+	`Prefer deepseek_web_search and deepseek_web_fetch over browser_* tools for searching the web and reading public pages; use browser_* tools only when interactive UI control, login, dynamic rendering, or visual inspection is needed. ` +
 	`Each result carries a title, url, publication date, site, an authority grade (0-4) and a relevance score (0-3); 1.5 and above is a good match. ` +
-	`Page text is not returned — call webfetch on a url to read one. ` +
+	`Page text is not returned — call deepseek_web_fetch on a url to read one. ` +
 	`Use it when the answer lives outside this repository (a release note, a specification, a paper, an upstream issue) or when you need many sources at once; ` +
 	`prefer grep when the answer is in the tree, because it is exact and free. ` +
 	`The query understands site:example.com, -site:example.com, "exact phrase", -word, lang:zh,en, after:2025-01-01 and before:2025-06-01; combine them to aim the search instead of fetching pages to filter them. ` +
@@ -41,8 +42,8 @@ const (
 
 type searchTool struct{ set *shared }
 
-func (t searchTool) Name() string                { return "websearch" }
-func (t searchTool) Label() string               { return "websearch" }
+func (t searchTool) Name() string                { return "deepseek_web_search" }
+func (t searchTool) Label() string               { return "deepseek_web_search" }
 func (t searchTool) Description() string         { return searchDescription }
 func (t searchTool) Parameters() json.RawMessage { return json.RawMessage(searchParameters) }
 
@@ -82,10 +83,10 @@ func (t searchTool) Execute(ctx context.Context, call tool.Call, _ func(tool.Par
 	}
 	query := strings.TrimSpace(request.Query)
 	if query == "" {
-		return tool.Result{}, fmt.Errorf("websearch: query is empty")
+		return tool.Result{}, fmt.Errorf("deepseek_web_search: query is empty")
 	}
 	if length := runeLen(query); length > searchMaxQuery {
-		return tool.Result{}, fmt.Errorf("websearch: query is %d characters and the endpoint accepts %d; narrow it with site: or drop words", length, searchMaxQuery)
+		return tool.Result{}, fmt.Errorf("deepseek_web_search: query is %d characters and the endpoint accepts %d; narrow it with site: or drop words", length, searchMaxQuery)
 	}
 	// Clamping rather than refusing: a count that is too large is a model
 	// overreaching, not a mistake worth failing the turn over, and the answer
@@ -99,7 +100,7 @@ func (t searchTool) Execute(ctx context.Context, call tool.Call, _ func(tool.Par
 
 	var reply searchReply
 	if err := t.set.do(ctx, searchPath, searchCall{Query: query, Count: count}, &reply); err != nil {
-		return tool.Result{}, explain("websearch", err)
+		return tool.Result{}, explain("deepseek_web_search", err)
 	}
 	return tool.Result{Content: []wire.Content{wire.TextContent(renderResults(reply.Results))}}, nil
 }

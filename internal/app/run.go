@@ -2,11 +2,13 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"sync"
 
 	"pi-go/internal/agent"
 	"pi-go/internal/session"
+	"pi-go/internal/tool"
 	"pi-go/internal/wire"
 )
 
@@ -136,6 +138,10 @@ func (q *messageQueue) currentMode() QueueMode {
 // Cancelling ctx aborts the turn; the result still carries what was produced, and
 // err reports the cancellation.
 func (a *App) Ask(ctx context.Context, prompt wire.Message, emit func(wire.AgentEvent) error) (Result, error) {
+	return a.ask(ctx, []wire.Message{prompt}, emit)
+}
+
+func (a *App) ask(ctx context.Context, prompts []wire.Message, emit func(wire.AgentEvent) error) (Result, error) {
 	a.mu.Lock()
 	if a.busy {
 		a.mu.Unlock()
@@ -147,11 +153,29 @@ func (a *App) Ask(ctx context.Context, prompt wire.Message, emit func(wire.Agent
 		a.mu.Unlock()
 		return Result{}, err
 	}
+	if err := a.applyPendingModelLocked(); err != nil {
+		a.mu.Unlock()
+		return Result{}, err
+	}
+	results, err := a.pendingSubagentsLocked()
+	if err != nil {
+		a.mu.Unlock()
+		return Result{}, err
+	}
+	if len(prompts) == 0 && len(results) == 0 {
+		a.mu.Unlock()
+		return Result{}, ErrNoSubagentResults
+	}
 	a.busy = true
 	a.mu.Unlock()
 
+	var cleanupSubagents func()
 	defer func() {
+		if cleanupSubagents != nil {
+			cleanupSubagents()
+		}
 		a.mu.Lock()
+		a.subagentTool = nil
 		a.busy = false
 		a.mu.Unlock()
 	}()
@@ -168,16 +192,42 @@ func (a *App) Ask(ctx context.Context, prompt wire.Message, emit func(wire.Agent
 	// The prompt must not be sent into a context that no longer holds it. This
 	// also catches the turn that was interrupted before its trailing compaction
 	// could run.
-	if err := a.admitContext(ctx, []wire.Message{prompt}, emit); err != nil {
+	admission := append([]wire.Message(nil), prompts...)
+	for _, update := range results {
+		admission = append(admission, wire.UserMessage(subagentNotice(update)))
+	}
+	if err := a.admitContext(ctx, admission, emit); err != nil {
 		return Result{}, err
 	}
 
 	a.mu.Lock()
+	if len(results) > 0 {
+		if err := a.recordSubagentResultsLocked(results); err != nil {
+			a.mu.Unlock()
+			return Result{}, err
+		}
+	}
+	if len(prompts) > 0 {
+		cleanupSubagents = a.prepareSubagentTool(ctx)
+	}
 	a.refreshTools(a.ag)
 	ag := a.ag
+	sessionCtx := tool.SessionContext{
+		ID:   a.manager.ID(),
+		File: a.manager.File(),
+		Cwd:  a.manager.Cwd(),
+	}
 	a.mu.Unlock()
 
-	result, err := runTurn(ctx, ag, []wire.Message{prompt}, a.persist, emit)
+	if emit != nil {
+		for _, update := range results {
+			update.SessionFile = ""
+			if err := emit(wire.AgentEvent{Type: wire.AgentEventSubagentUpdate, ToolCallID: update.ToolCallID, ToolName: wire.SubagentToolName, Subagent: &update}); err != nil {
+				return Result{}, err
+			}
+		}
+	}
+	result, err := runTurn(tool.WithSession(ctx, sessionCtx), ag, prompts, a.persist, emit)
 	if err != nil {
 		return result, err
 	}
@@ -249,12 +299,21 @@ func (a *App) persist(message wire.Message) error {
 		return nil
 	}
 	a.mu.Lock()
-	defer a.mu.Unlock()
 	a.nameFromFirstMessage(message)
-	if _, err := a.manager.AppendMessage(message); err != nil {
+	entryID, err := a.manager.AppendMessage(message)
+	if err != nil {
+		a.mu.Unlock()
 		return err
 	}
 	a.messages = append(a.messages, message)
+	sessionID := a.manager.ID()
+	a.mu.Unlock()
+	if a.subagents != nil && message.Role == wire.RoleToolResult && message.ToolName == wire.SubagentToolName {
+		var task wire.SubagentUpdate
+		if json.Unmarshal(message.Details, &task) == nil && task.ID != "" && task.State == "queued" {
+			a.subagents.Commit(sessionID, task.ID, entryID)
+		}
+	}
 	return nil
 }
 

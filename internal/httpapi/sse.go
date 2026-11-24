@@ -164,12 +164,19 @@ func (s *Server) serveEvents(w http.ResponseWriter, r *http.Request) {
 	sub := s.broker.subscribe()
 	defer s.broker.unsubscribe(sub)
 
-	if payload, err := json.Marshal(s.facts); err == nil {
+	facts, _ := s.currentFacts()
+	hello := struct {
+		Facts
+		Session string `json:"session,omitempty"`
+	}{Facts: facts, Session: s.currentSessionKey()}
+	if payload, err := json.Marshal(hello); err == nil {
 		if _, err := w.Write(streamEvent{Name: "hello", Data: payload}.frame()); err != nil {
 			return
 		}
 		flusher.Flush()
 	}
+
+	s.WakeSubagents(hello.Session)
 
 	heartbeat := time.NewTicker(heartbeatEvery)
 	defer heartbeat.Stop()

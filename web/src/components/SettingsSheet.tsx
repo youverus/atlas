@@ -1,5 +1,5 @@
-import { useEffect, useState } from "react";
-import { api, type ModelList, type PermissionState, type Stats } from "../api";
+import { useEffect, useRef, useState } from "react";
+import { api, ApiError, type Connection, type ModelList, type PermissionState, type Stats } from "../api";
 import type { Theme } from "../lib/useTheme";
 
 // The settings sheet: model, reasoning effort, permission posture, appearance,
@@ -12,6 +12,7 @@ export function SettingsSheet({
   onClose,
   onModelChanged,
   onPermissionChanged,
+  onConfirmed,
 }: {
   open: boolean;
   theme: Theme;
@@ -19,12 +20,16 @@ export function SettingsSheet({
   onClose: () => void;
   onModelChanged: () => void;
   onPermissionChanged: () => void;
+  onConfirmed: () => Promise<void> | void;
 }) {
   const [models, setModels] = useState<ModelList | null>(null);
   const [stats, setStats] = useState<Stats | null>(null);
   const [permission, setPermission] = useState<PermissionState | null>(null);
+  const [connection, setConnection] = useState<Connection | null>(null);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  const [confirming, setConfirming] = useState(false);
+  const bodyRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     if (!open) return;
@@ -41,12 +46,61 @@ export function SettingsSheet({
         if (!live) return;
         setError(cause instanceof Error ? cause.message : String(cause));
       });
+    // 401 时拿不到是正常的：带全局 token 的 headless 实例上，页面自己都没过
+    // guard。此时收起卡片，而不是把设置页变成一个错误面板。
+    api.connection()
+      .then((info) => {
+        if (live) setConnection(info);
+      })
+      .catch(() => {
+        if (live) setConnection(null);
+      });
     return () => {
       live = false;
     };
   }, [open]);
 
+  useEffect(() => {
+    if (!open) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && !busy) {
+        onClose();
+      }
+    };
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
+  }, [open, busy, onClose]);
+
   if (!open) return null;
+
+  const confirm = async () => {
+    setBusy(true);
+    setConfirming(true);
+    setError("");
+    try {
+      try {
+        await api.reloadConfig();
+      } catch (cause) {
+        if (cause instanceof ApiError && cause.status === 501) {
+          onClose();
+          return;
+        }
+        throw cause;
+      }
+      const [catalog, usage, gate] = await Promise.all([api.models(), api.stats(), api.permission()]);
+      setModels(catalog);
+      setStats(usage);
+      setPermission(gate);
+      await onConfirmed();
+      onClose();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+      bodyRef.current?.scrollTo({ top: 0 });
+    } finally {
+      setBusy(false);
+      setConfirming(false);
+    }
+  };
 
   const chooseModel = async (value: string) => {
     const option = models?.models.find((item) => `${item.provider}/${item.id}` === value);
@@ -104,18 +158,18 @@ export function SettingsSheet({
       className="sheet-backdrop"
       role="presentation"
       onMouseDown={(event) => {
-        if (event.target === event.currentTarget) onClose();
+        if (event.target === event.currentTarget && !busy) onClose();
       }}
     >
       <div className="sheet" role="dialog" aria-modal="true" aria-label="设置">
         <div className="sheet__head">
           <span className="sheet__title">设置</span>
-          <button type="button" className="icon-button" onClick={onClose} aria-label="关闭">
+          <button type="button" className="icon-button" disabled={busy} onClick={onClose} aria-label="关闭">
             ✕
           </button>
         </div>
 
-        <div className="sheet__body">
+        <div className="sheet__body" ref={bodyRef}>
           {error ? <div className="notice notice--error">{error}</div> : null}
 
           <div className="field">
@@ -140,6 +194,9 @@ export function SettingsSheet({
                 上下文窗口 {format(current.contextWindow)} tokens
                 {current.reasoning ? " · 支持推理" : ""}
               </div>
+            ) : null}
+            {models?.pending ? (
+              <div className="field__hint">当前会话正在运行，下一条消息将切换为 {models.pending}</div>
             ) : null}
           </div>
 
@@ -181,6 +238,25 @@ export function SettingsSheet({
                 {permission.modes.find((option) => option.value === permission.mode)?.note ?? ""}
               </div>
               <div className="field__hint">只影响本次运行，下次启动仍然读配置文件</div>
+            </div>
+          ) : null}
+
+          {connection ? (
+            <div className="field">
+              <div className="field__label">浏览器扩展</div>
+              <div className="field__hint" style={{ wordBreak: "break-all" }}>
+                <span className="connection-kv">{connection.url}</span>
+                <CopyButton value={connection.url} label="复制地址" />
+              </div>
+              {connection.token ? (
+                <div className="field__hint" style={{ wordBreak: "break-all" }}>
+                  <span className="connection-kv">{connection.token}</span>
+                  <CopyButton value={connection.token} label="复制 token" />
+                </div>
+              ) : null}
+              <div className="field__hint">
+                在 Atlas 浏览器扩展的选项页粘贴以上地址与 token 即可连接本机会话；token 是本机签发的访问凭据，请勿外传。
+              </div>
             </div>
           ) : null}
 
@@ -243,6 +319,14 @@ export function SettingsSheet({
             </div>
           ) : null}
         </div>
+
+        <div className="sheet__foot">
+          <div className="sheet__actions">
+            <button type="button" className="button button--primary" disabled={busy} onClick={() => void confirm()}>
+              {confirming ? "读取中…" : "确认"}
+            </button>
+          </div>
+        </div>
       </div>
     </div>
   );
@@ -252,4 +336,24 @@ function format(value: number): string {
   if (!value) return "0";
   if (value >= 1000) return `${(value / 1000).toFixed(value >= 10000 ? 0 : 1)}k`;
   return String(value);
+}
+
+// CopyButton copies one connection field and admits it for a moment, so the
+// reader sees the click land before the label returns.
+function CopyButton({ value, label }: { value: string; label: string }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <button
+      type="button"
+      className="button"
+      onClick={() => {
+        void navigator.clipboard.writeText(value).then(() => {
+          setCopied(true);
+          window.setTimeout(() => setCopied(false), 1500);
+        });
+      }}
+    >
+      {copied ? "已复制" : label}
+    </button>
+  );
 }

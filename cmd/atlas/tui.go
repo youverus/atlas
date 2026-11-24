@@ -25,6 +25,19 @@ import (
 	"pi-go/internal/wire"
 )
 
+type subagentRuntimeKey struct{}
+
+type registerSubagentObserver func(func(wire.SubagentUpdate))
+
+func withSubagentRuntime(ctx context.Context, register func(func(wire.SubagentUpdate))) context.Context {
+	return context.WithValue(ctx, subagentRuntimeKey{}, registerSubagentObserver(register))
+}
+
+func subagentRuntimeFromContext(ctx context.Context) registerSubagentObserver {
+	register, _ := ctx.Value(subagentRuntimeKey{}).(registerSubagentObserver)
+	return register
+}
+
 // runTUI runs the session on the alternate screen until the reader leaves.
 func runTUI(ctx context.Context, application *app.App, side *sideState, servers mcpState, models models, resume *sessionPicker, prompts *assembly.PromptSource, bar *statusBar, cfg *config.Config, cwd string, stdio streams) error {
 	styles, err := tuiStyles(cfg, cwd, stdio)
@@ -35,10 +48,33 @@ func runTUI(ctx context.Context, application *app.App, side *sideState, servers 
 	// opens does not also announce itself in a notice.
 	side.home = true
 
+	programCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	register := subagentRuntimeFromContext(ctx)
+	var subagents *tui.SubagentRuntime
+	if register != nil {
+		subagents = &tui.SubagentRuntime{
+			Session: func() (string, string) {
+				current := application.Session()
+				return current.ID(), current.File()
+			},
+			// A user turn will pick up results alongside any queued user messages.
+			Ready: func() bool { return application.PendingCount() == 0 && application.HasSubagentResults() },
+			Run: func(ctx context.Context, sink tui.Sink) error {
+				setTUIApproval(application, side, sink)
+				_, err := tuiTurn(ctx, sink, application.ProcessSubagentResults)
+				if errors.Is(err, app.ErrNoSubagentResults) {
+					return nil
+				}
+				return err
+			},
+		}
+	}
 	model := tui.New(tui.Config{
-		Styles: styles,
-		Layout: tuiLayout(cfg),
-		Title:  "atlas " + version,
+		Context: programCtx,
+		Styles:  styles,
+		Layout:  tuiLayout(cfg),
+		Title:   "atlas " + version,
 		// The home screen repeats three of the footer's facts. That is not a
 		// second source of truth: the footer is one line under a conversation
 		// that has already started, and the first thing a session shows is
@@ -57,9 +93,10 @@ func runTUI(ctx context.Context, application *app.App, side *sideState, servers 
 		// would be a second implementation of "which model, how much context is
 		// left". Only the width matters here; the view and the busy flag are
 		// spelled by the prompt instead.
-		Status: func(width int) string { return bar.line(width) },
-		Run: func(ctx context.Context, line string, sink tui.Sink) error {
-			return runTUILine(ctx, application, side, servers, models, resume, prompts, chooser(sink.Pick), line, sink)
+		Status:    func(width int) string { return bar.line(width) },
+		Subagents: subagents,
+		Run: func(turnCtx context.Context, prompt tui.Prompt, sink tui.Sink) error {
+			return runTUILine(turnCtx, application, side, servers, models, resume, prompts, chooser(sink.Pick), prompt, sink)
 		},
 		Toggle: func() (int, string) {
 			notes := &noteWriter{note: func(string) {}}
@@ -88,7 +125,14 @@ func runTUI(ctx context.Context, application *app.App, side *sideState, servers 
 		// typed, the files it could become. It resolves against the session's
 		// directory, which is the one the sender will use — a list built from a
 		// different tree would offer names the next Enter cannot read.
-		Attach: func(line string) []tui.Suggestion { return attachSuggestions(line, attachDir(application)) },
+		Attach: func(line string) []tui.Suggestion {
+			if conversation := side.active(); conversation != nil {
+				return attachSuggestions(line, conversation.Session().Cwd())
+			}
+			subagents := register != nil && !application.Archived() && !strings.HasPrefix(strings.TrimSpace(line), "/")
+			return attachSuggestionsFor(line, attachDir(application), subagents)
+		},
+		IsImage: isAttachImage,
 		// Stopping a turn hands back what was queued behind it: those messages
 		// were written for the turn that is being abandoned, and the next one
 		// must not open with them.
@@ -96,11 +140,12 @@ func runTUI(ctx context.Context, application *app.App, side *sideState, servers 
 	})
 
 	program := tea.NewProgram(model)
-	// A signal or a caller cancelling the context is the one way out that does
-	// not come through a key: without this the program would keep the terminal
-	// until the process died.
+	if register != nil {
+		register(func(update wire.SubagentUpdate) { model.SendSubagentUpdate(programCtx, update) })
+		defer register(nil)
+	}
 	go func() {
-		<-ctx.Done()
+		<-programCtx.Done()
 		program.Quit()
 	}()
 	// The release check runs on its own so a slow or unreachable network never
@@ -214,28 +259,27 @@ func welcomeNote(application *app.App, bar *statusBar) string {
 
 // runTUILine handles one submitted line: a slash command, a side turn, or a main
 // turn. The order matters and is the same one the REPL uses.
-func runTUILine(ctx context.Context, application *app.App, side *sideState, servers mcpState, models models, resume *sessionPicker, prompts *assembly.PromptSource, pick chooser, line string, sink tui.Sink) error {
-	if side != nil && side.gate != nil && application != nil {
-		// The question is rebuilt per turn because it closes over the turn's
-		// sink; what a "yes, and stop asking" answer remembers is keyed by the
-		// session open right now, so a session switch starts from no standing
-		// answers. Installing it before commands and main turns lets both the
-		// main permission ladder and the side conversation ask through the same
-		// modal.
-		side.gate.SetSession(func() string { return application.Session().ID() })
-		side.setAsk(func(request assembly.Ask) assembly.Answer {
-			reply := sink.Ask(tui.AskRequest{Subject: request.Subject, Tool: request.Tool})
-			return assembly.Answer{Allowed: reply.Allowed, Always: reply.Always}
-		}, sink.Note)
-	}
-	trimmed := strings.TrimSpace(line)
-	if strings.HasPrefix(trimmed, "/") {
-		return runTUICommand(ctx, application, side, servers, models, resume, prompts, pick, trimmed, sink)
+func runTUILine(ctx context.Context, application *app.App, side *sideState, servers mcpState, models models, resume *sessionPicker, prompts *assembly.PromptSource, pick chooser, prompt tui.Prompt, sink tui.Sink) error {
+	setTUIApproval(application, side, sink)
+	if trimmed := strings.TrimSpace(prompt.Text); strings.HasPrefix(trimmed, "/") {
+		return runTUICommand(ctx, application, side, servers, models, resume, prompts, pick, trimmed, sink, prompt.Images...)
 	}
 	if conversation := side.active(); conversation != nil {
-		return tuiSideTurn(ctx, conversation, line, sink)
+		return tuiSideTurn(ctx, conversation, prompt, sink)
 	}
-	return tuiMainTurn(ctx, application, line, sink)
+	return tuiMainTurn(ctx, application, prompt.Text, sink, prompt.Images...)
+}
+
+// setTUIApproval binds the gate to the current turn and session.
+func setTUIApproval(application *app.App, side *sideState, sink tui.Sink) {
+	if side == nil || side.gate == nil || application == nil {
+		return
+	}
+	side.gate.SetSession(func() string { return application.Session().ID() })
+	side.setAsk(func(request assembly.Ask) assembly.Answer {
+		reply := sink.Ask(tui.AskRequest{Subject: request.Subject, Tool: request.Tool})
+		return assembly.Answer{Allowed: reply.Allowed, Always: reply.Always}
+	}, sink.Note)
 }
 
 // runTUICommand runs one slash command and turns its output into notices.
@@ -243,7 +287,7 @@ func runTUILine(ctx context.Context, application *app.App, side *sideState, serv
 // The command table is the one the inline interface uses, unchanged: it writes
 // to an io.Writer and reads session state, which is exactly the contract a notice
 // writer can satisfy.
-func runTUICommand(ctx context.Context, application *app.App, side *sideState, servers mcpState, models models, resume *sessionPicker, prompts *assembly.PromptSource, pick chooser, line string, sink tui.Sink) error {
+func runTUICommand(ctx context.Context, application *app.App, side *sideState, servers mcpState, models models, resume *sessionPicker, prompts *assembly.PromptSource, pick chooser, line string, sink tui.Sink, images ...string) error {
 	// Each line goes to whichever conversation is the prompt's home when it is
 	// written, and the switch is announced first. /side asks its question before
 	// the command returns, so a stream that were pinned to the old view would put
@@ -253,7 +297,7 @@ func runTUICommand(ctx context.Context, application *app.App, side *sideState, s
 		sink.Note(line)
 	}}
 	render := newRenderer(notes, notes, false)
-	sessionBefore := application.Session().ID()
+	sessionBefore, fileBefore := application.Session().ID(), application.Session().File()
 	// Nil when this front end has no side view at all (a pipe, a test): only a
 	// screen has one, and only a screen has a transcript to drop there.
 	var sideBefore *app.Side
@@ -268,7 +312,7 @@ func runTUICommand(ctx context.Context, application *app.App, side *sideState, s
 		return tuiTurn(turnCtx, sink, run)
 	}
 
-	done, err := replCommand(ctx, application, side, line, models, resume, pick, prompts, notes, render, servers, sink.Compose, turn)
+	done, err := replCommand(ctx, application, side, line, models, resume, pick, prompts, notes, render, servers, turn, images...)
 	notes.Flush()
 	// A command may have moved the prompt (/side, /parent, /side off) or swapped
 	// the session out from under the transcript (/new, /resume, /fork).
@@ -283,7 +327,7 @@ func runTUICommand(ctx context.Context, application *app.App, side *sideState, s
 		// would erase the only copy of the turn.
 		sink.Reset(tui.ViewSide)
 	}
-	if application.Session().ID() != sessionBefore {
+	if current := application.Session(); current.ID() != sessionBefore || current.File() != fileBefore {
 		// Everything the command said belongs to the conversation that is gone:
 		// "resumed: …", the note about a recorded directory, the fork's two
 		// lines. The transcript is dropped, so that report is said again after
@@ -313,9 +357,7 @@ func runTUICommand(ctx context.Context, application *app.App, side *sideState, s
 			// The answer is handed over as an answer, not as lines: the
 			// interface wraps it inside the bar, which is the shape the live
 			// turn had.
-			writeTranscript(notes, application.Messages(), func(text string) {
-				sink.Answer(text)
-			})
+			replayTUIHistory(application, notes, sink)
 			notes.Flush()
 		}
 	}
@@ -326,6 +368,24 @@ func runTUICommand(ctx context.Context, application *app.App, side *sideState, s
 		return tui.ErrExit
 	}
 	return nil
+}
+
+// replayTUIHistory uses the stored entry type to identify runtime reports.
+func replayTUIHistory(application *app.App, notes *noteWriter, sink tui.Sink) {
+	messages := application.Messages()
+	if count := conversationLength(messages); count > 0 {
+		fmt.Fprintf(notes, "history: %s\n", countText(count))
+	}
+	results, calls := recordedToolCalls(messages)
+	for _, message := range messages {
+		if message.Subagent != nil {
+			sink.Note(tui.SubagentReportText(message.Text()))
+			continue
+		}
+		if body := recordedMessage(message, results, calls, sink.Answer); body != "" {
+			fmt.Fprint(notes, body)
+		}
+	}
 }
 
 // homeFlash is the one line the home page says about the command that sent the
@@ -355,15 +415,20 @@ func homeFlash(line string, report []string) string {
 	return report[0]
 }
 
-func tuiMainTurn(ctx context.Context, application *app.App, line string, sink tui.Sink) error {
-	// A reference that cannot be attached stops the turn here: the model would
-	// read the sentence as prose and answer about a file it never saw, which is
-	// the one failure a reader cannot detect from the answer.
-	message, err := attachMessage(line, attachDir(application))
+func tuiMainTurn(ctx context.Context, application *app.App, line string, sink tui.Sink, images ...string) error {
+	message, err := interactiveMessage(line, images)
 	if err != nil {
 		return err
 	}
+	subagents := subagentRuntimeFromContext(ctx) != nil && !application.Archived()
+	var roles []string
+	if subagents {
+		roles = wire.SubagentRoles(line)
+	}
 	if _, err := tuiTurn(ctx, sink, func(turnCtx context.Context, emit func(wire.AgentEvent) error) (app.Result, error) {
+		if subagents {
+			turnCtx = app.WithSubagentRoles(turnCtx, roles)
+		}
 		return application.Ask(turnCtx, message, emit)
 	}); err != nil {
 		return err
@@ -386,8 +451,8 @@ func tuiMainTurn(ctx context.Context, application *app.App, line string, sink tu
 	return nil
 }
 
-func tuiSideTurn(ctx context.Context, conversation *app.Side, line string, sink tui.Sink) error {
-	message, err := attachMessage(line, conversation.Session().Cwd())
+func tuiSideTurn(ctx context.Context, conversation *app.Side, prompt tui.Prompt, sink tui.Sink) error {
+	message, err := interactiveMessage(prompt.Text, prompt.Images)
 	if err != nil {
 		return err
 	}

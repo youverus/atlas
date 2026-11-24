@@ -36,13 +36,26 @@ func (a *App) SessionDir(cwd string) (string, error) {
 // The old conversation is deliberately not written here, for the reason
 // NewSession gives: a conversation nobody talked to leaves no file behind.
 func (a *App) NewSessionIn(cwd string) error {
+	return a.newSessionIn(cwd, true)
+}
+
+// NewSessionInLeavingArchived starts a fresh empty conversation in cwd even when
+// the conversation currently in view is archived, leaving the archived file
+// untouched.
+func (a *App) NewSessionInLeavingArchived(cwd string) error {
+	return a.newSessionIn(cwd, false)
+}
+
+func (a *App) newSessionIn(cwd string, guardArchived bool) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.busy {
 		return ErrBusy
 	}
-	if err := a.guardArchived(); err != nil {
-		return err
+	if guardArchived {
+		if err := a.guardArchived(); err != nil {
+			return err
+		}
 	}
 	trimmed := cwd
 	if trimmed == "" {
@@ -99,6 +112,7 @@ func (a *App) NewSessionIn(cwd string) error {
 	a.model = a.baseModel
 	a.provider = a.baseProvider
 	a.thinking = a.baseThinking
+	a.pendingModel = nil
 	a.systemPrompt = prompt
 	a.promptSource = source
 	a.restoreNote = ""

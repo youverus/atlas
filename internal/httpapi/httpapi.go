@@ -23,13 +23,15 @@ package httpapi
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"net"
 	"net/http"
+	"sort"
 	"strings"
 	"sync"
-	"sync/atomic"
 
 	"pi-go/internal/httpapi/web"
 	"pi-go/internal/wire"
@@ -48,15 +50,25 @@ import (
 type Turn func(ctx context.Context, prompt string, emit func(wire.AgentEvent) error) (Receipt, error)
 
 // Compact runs one manual compaction of the conversation in view.
-//
-// It is a function of its own rather than a Host method for the reason Turn is:
-// it emits while it runs, and only this package knows where events go. The
-// kernel's compaction already announces itself — compaction_start, then
-// compaction_end carrying either the result or the error — so an implementation
-// forwards and decides nothing. The numbers a reader sees are read off that end
-// event, which is why nothing is returned: a second copy on the response would
-// be a second opinion about what the same compaction did.
 type Compact func(ctx context.Context, note string, emit func(wire.AgentEvent) error) error
+
+// Attachment carries one file uploaded from the composer (image, pdf, or text).
+type Attachment struct {
+	Kind     string `json:"kind"`
+	Name     string `json:"name"`
+	MIMEType string `json:"mimeType,omitempty"`
+	Data     string `json:"data"`
+}
+
+// SessionTurn runs one prompt on a named session in multi-session hosts so
+// multiple conversations can run concurrently without blocking each other.
+type SessionTurn func(ctx context.Context, session, prompt string, emit func(wire.AgentEvent) error) (Receipt, error)
+
+// SessionAttachmentTurn runs one prompt carrying attachments on a named session.
+type SessionAttachmentTurn func(ctx context.Context, session, prompt string, attachments []Attachment, emit func(wire.AgentEvent) error) (Receipt, error)
+
+// SessionCompact runs one manual compaction on a named session.
+type SessionCompact func(ctx context.Context, session, note string, emit func(wire.AgentEvent) error) error
 
 // Receipt is what one turn spent, in the words a reader reads.
 //
@@ -67,7 +79,10 @@ type Compact func(ctx context.Context, note string, emit func(wire.AgentEvent) e
 // the window's business: the terminal joins with a dot, a browser can lay the
 // parts out differently, and neither needs the transport to choose.
 type Receipt struct {
-	Fields []string `json:"fields,omitempty"`
+	Fields       []string `json:"fields,omitempty"`
+	EndedAt      int64    `json:"endedAt,omitempty"`
+	DurationMs   int64    `json:"durationMs,omitempty"`
+	TokensPerSec float64  `json:"tokensPerSec,omitempty"`
 }
 
 // Facts is what the page prints before anything has happened: the version, the
@@ -98,6 +113,18 @@ type Options struct {
 	// signal the page uses to offer a path field instead.
 	Picker Picker
 
+	// Terminal manages interactive embedded PTY sessions. Only a local/desktop
+	// shell has one; nil causes /api/terminal/* routes to answer 501.
+	Terminal TerminalController
+
+	// FocusShell raises the shell's main window (the desktop pet's
+	// double-click). Nil causes /api/shell/focus to answer 501.
+	FocusShell FocusShell
+
+	// Pet manages the desktop pet companion window (the settings switch).
+	// Nil causes /api/shell/pet routes to answer 501.
+	Pet PetController
+
 	// Compact runs a manual compaction. Nil means this build cannot compact,
 	// and the route says so instead of pretending the command did nothing.
 	Compact Compact
@@ -107,31 +134,92 @@ type Options struct {
 	// agents: routing by which one is "current" would put that state in the
 	// transport, where a reload loses it.
 	SideTurn Turn
+
+	// SessionTurn, SessionAttachmentTurn, SessionCompact, and SessionSideTurn enable concurrent
+	// multi-session execution scoped by session key when provided.
+	SessionTurn           SessionTurn
+	SessionAttachmentTurn SessionAttachmentTurn
+	SessionCompact        SessionCompact
+	SessionSideTurn       SessionTurn
+	Subagents             SubagentController
+
+	// UsageHistory supplies local usage totals for the statistics settings.
+	UsageHistory UsageHistorySource
+
+	// Remote adds optional management endpoints for embedded IM remote control
+	// gateways (e.g. Feishu). Nil causes /api/remote* routes to answer 501.
+	Remote RemoteController
+
+	// Scheduler adds optional management endpoints for recurring/scheduled tasks.
+	// Nil causes /api/schedules* routes to answer 501.
+	Scheduler SchedulerController
+
+	// Devices adds optional management endpoints for SSH remote devices.
+	// Nil causes /api/devices* routes to answer 501.
+	Devices DeviceController
+
+	// Artifacts adds optional endpoints for inspecting and exporting
+	// session-scoped artifacts. Nil causes /api/artifacts* routes to answer 501.
+	Artifacts ArtifactController
+
+	// RemoteRouter forwards session turns, approvals, compact, and side turns
+	// for connected remote devices.
+	RemoteRouter RemoteRouter
+
+	// AuthToken, when non-empty, requires "Authorization: Bearer <token>" on
+	// incoming HTTP requests (used by headless `atlas -serve` over SSH tunnels).
+	AuthToken string
+
+	// ExtensionToken, when non-empty, admits a second kind of caller: browser
+	// extensions. Such a request must carry a chrome/moz/safari extension
+	// Origin and "Authorization: Bearer <ExtensionToken>", so the page this
+	// server serves stays token-free while an installed extension still has to
+	// prove it was issued the credential. Extension route: GET /api/connection
+	// reports the URL and token for the extension's options page.
+	ExtensionToken string
+
+	// ExtensionApprovals admits extensions a human approved through
+	// POST /api/extension/pair, so the options page needs no token paste: the
+	// request rings the ordinary approval card, and an approval persists the
+	// extension origin for later requests. Nil keeps pairing off (a headless
+	// -serve has no window to answer in; the token remains its path).
+	ExtensionApprovals ExtensionApprovals
 }
 
 // Server is a loopback HTTP endpoint for one conversation.
 type Server struct {
-	turn     Turn
-	compact  Compact
-	sideTurn Turn
-	facts    Facts
-	host     Host
-	picker   Picker
+	turn                  Turn
+	compact               Compact
+	sideTurn              Turn
+	sessionTurn           SessionTurn
+	sessionAttachmentTurn SessionAttachmentTurn
+	sessionCompact        SessionCompact
+	sessionSideTurn       SessionTurn
+	subagents             SubagentController
+	usageHistory          UsageHistorySource
+	turnContext           context.Context
+	cancelTurns           context.CancelFunc
+	facts                 Facts
+	host                  Host
+	picker                Picker
+	terminal              TerminalController
+	focusShell            FocusShell
+	pet                   PetController
+	remote                RemoteController
+	scheduler             SchedulerController
+	devices               DeviceController
+	artifacts             ArtifactController
+	remoteRouter          RemoteRouter
+	authToken             string
+	extensionToken        string
+	extensionApprovals    ExtensionApprovals
 
 	broker    *broker
 	approvals *approvals
 	mux       *http.ServeMux
 
-	// running is the single-turn latch. One conversation has one turn in
-	// flight; a second POST while one runs is refused instead of queued,
-	// because the window can be clicked twice faster than a turn finishes and
-	// a queue would replay the same prompt later with no way to see it coming.
-	running atomic.Bool
-
-	// sideRunning is the same latch for the side conversation, and it is
-	// separate on purpose: the two agents run concurrently, so a turn on one
-	// must not be refused because the other is busy.
-	sideRunning atomic.Bool
+	runsMu sync.Mutex
+	runs   map[turnKey]*activeTurn
 
 	listener net.Listener
 	http     *http.Server
@@ -143,29 +231,61 @@ type Server struct {
 // New builds a server. It does not listen; see Listen.
 func New(options Options) *Server {
 	server := &Server{
-		turn:      options.Turn,
-		compact:   options.Compact,
-		sideTurn:  options.SideTurn,
-		facts:     options.Facts,
-		host:      options.Host,
-		picker:    options.Picker,
-		broker:    newBroker(),
-		approvals: newApprovals(),
+		turn:                  options.Turn,
+		compact:               options.Compact,
+		sideTurn:              options.SideTurn,
+		sessionTurn:           options.SessionTurn,
+		sessionAttachmentTurn: options.SessionAttachmentTurn,
+		sessionCompact:        options.SessionCompact,
+		sessionSideTurn:       options.SessionSideTurn,
+		subagents:             options.Subagents,
+		usageHistory:          options.UsageHistory,
+		facts:                 options.Facts,
+		host:                  options.Host,
+		picker:                options.Picker,
+		terminal:              options.Terminal,
+		focusShell:            options.FocusShell,
+		pet:                   options.Pet,
+		remote:                options.Remote,
+		scheduler:             options.Scheduler,
+		devices:               options.Devices,
+		artifacts:             options.Artifacts,
+		remoteRouter:          options.RemoteRouter,
+		authToken:             options.AuthToken,
+		extensionToken:        options.ExtensionToken,
+		extensionApprovals:    options.ExtensionApprovals,
+		broker:                newBroker(),
+		approvals:             newApprovals(),
+		runs:                  make(map[turnKey]*activeTurn),
 	}
+	server.turnContext, server.cancelTurns = context.WithCancel(context.Background())
 	server.mux = http.NewServeMux()
 	// One root pattern rather than an exact "/": the page owns its own assets
 	// and its own deep links, and every /api route below is more specific, so
 	// ServeMux still sends them to their handlers.
 	server.mux.Handle("GET /", web.Handler())
 	server.mux.HandleFunc("GET /api/state", server.serveState)
+	server.mux.HandleFunc("GET /api/usage-history", server.serveUsageHistory)
+	server.mux.HandleFunc("GET /api/connection", server.serveConnection)
+	server.mux.HandleFunc("POST /api/extension/pair", server.serveExtensionPair)
 	server.mux.HandleFunc("GET /api/events", server.serveEvents)
 	server.mux.HandleFunc("POST /api/ask", server.serveAsk)
+	server.mux.HandleFunc("POST /api/stop", server.serveStop)
+	server.mux.HandleFunc("POST /api/subagents/stop", server.serveSubagentStop)
 	server.mux.HandleFunc("POST /api/approval", server.serveApproval)
+	server.mux.HandleFunc("POST /api/shell/focus", server.serveShellFocus)
+	server.mux.HandleFunc("GET /api/shell/pet", server.servePetStatus)
+	server.mux.HandleFunc("POST /api/shell/pet", server.servePetSet)
 	server.mux.HandleFunc("POST /api/compact", server.serveCompact)
 	server.mux.HandleFunc("GET /api/side", server.serveSide)
 	server.mux.HandleFunc("POST /api/side", server.serveSideOpen)
 	server.mux.HandleFunc("POST /api/side/ask", server.serveSideAsk)
 	server.mux.HandleFunc("POST /api/side/close", server.serveSideClose)
+	server.mountRemote()
+	server.mountSchedules()
+	server.mountTerminal()
+	server.mountDevices()
+	server.mountArtifacts()
 	if options.Host != nil {
 		server.mountHost()
 	}
@@ -182,7 +302,24 @@ func (s *Server) Handler() http.Handler {
 // It returns the address the window should open, because a fixed port is a
 // port someone else already has.
 func (s *Server) Listen() (string, error) {
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	return s.ListenOn("127.0.0.1:0")
+}
+
+// ListenOn binds a loopback address (defaulting to 127.0.0.1:0 when empty)
+// and serves in the background. Non-loopback bind addresses are rejected so the
+// server never exposes an unencrypted agent API on LAN/public interfaces.
+func (s *Server) ListenOn(addr string) (string, error) {
+	if strings.TrimSpace(addr) == "" {
+		addr = "127.0.0.1:0"
+	}
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return "", err
+	}
+	if !loopbackName(host) {
+		return "", errors.New("httpapi: listen address must be a loopback host")
+	}
+	listener, err := net.Listen("tcp", addr)
 	if err != nil {
 		return "", err
 	}
@@ -237,6 +374,7 @@ func (s *Server) Close() error {
 	server := s.http
 	s.mu.Unlock()
 
+	s.cancelTurns()
 	s.broker.close()
 	// A question still open means a turn parked on the tool goroutine. Denying
 	// it here is what lets that turn finish instead of outliving the window.
@@ -252,7 +390,11 @@ func (s *Server) Close() error {
 // The Host check is the one that matters: a browser always sends the name it
 // used, so a rebound name arrives here and is refused. Origin is checked when
 // present for the same reason at a second layer — a cross-site POST carries the
-// other site's origin.
+// other site's origin. The cross-origin callers admitted are browser
+// extensions: one holding the extension token (extensionAdmitted) or one the
+// reader approved through the pairing route (ExtensionApprovals). That route
+// itself stays reachable for a not-yet-approved extension — it is the knock on
+// the door, answered by the ordinary approval card.
 func (s *Server) guard(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		host := hostOnly(r.Host)
@@ -260,16 +402,45 @@ func (s *Server) guard(next http.Handler) http.Handler {
 			http.Error(w, "httpapi: unexpected host", http.StatusForbidden)
 			return
 		}
-		if origin := r.Header.Get("Origin"); origin != "" {
-			allowed := "http://" + r.Host
-			if origin != allowed {
+		extensionReq := false
+		if origin := r.Header.Get("Origin"); origin != "" && origin != "http://"+r.Host {
+			switch {
+			case r.Method == http.MethodPost && r.URL.Path == extensionPairPath && extensionOrigin(origin):
+				// The knock on the door: pass through to the route, which
+				// rings the approval card and enforces the rest.
+			case s.extensionAdmitted(origin, r):
+				// Admitted on the token already; the global AuthToken below is
+				// for everyone else.
+				extensionReq = true
+			case s.extensionApprovals != nil && s.extensionApprovals.Approved(origin):
+				extensionReq = true
+			default:
 				http.Error(w, "httpapi: unexpected origin", http.StatusForbidden)
+				return
+			}
+		}
+		if !extensionReq && s.authToken != "" {
+			const prefix = "Bearer "
+			auth := r.Header.Get("Authorization")
+			if !strings.HasPrefix(auth, prefix) ||
+				subtle.ConstantTimeCompare([]byte(strings.TrimPrefix(auth, prefix)), []byte(s.authToken)) != 1 {
+				http.Error(w, "httpapi: unauthorized", http.StatusUnauthorized)
 				return
 			}
 		}
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		next.ServeHTTP(w, r)
 	})
+}
+
+// PublishEvent pushes a pre-encoded SSE event frame onto all connected stream
+// subscribers. Used by the remote SSE bridge to relay events from forwarded
+// remote `atlas -serve` hosts into the local page stream.
+func (s *Server) PublishEvent(name string, data []byte) {
+	if s == nil || s.broker == nil || name == "" {
+		return
+	}
+	s.broker.publish(streamEvent{Name: name, Data: data})
 }
 
 // hostOnly drops the port from a Host header. IPv6 literals keep their
@@ -298,88 +469,345 @@ func loopbackName(host string) bool {
 	return false
 }
 
+func (s *Server) currentFacts() (Facts, bool) {
+	facts := s.facts
+	archived := false
+	if status, ok := s.host.(SessionStatus); ok {
+		archived = status.SessionArchived()
+		if dir := status.SessionDirectory(); dir != "" {
+			facts.Directory = dir
+		}
+	}
+	if modelStatus, ok := s.host.(LiveModelStatus); ok {
+		if model := modelStatus.SessionModel(); model != "" {
+			facts.Model = model
+		}
+	}
+	return facts, archived
+}
+
+func (s *Server) currentSessionKey() string {
+	if tracker, ok := s.host.(SessionTracker); ok {
+		return tracker.CurrentSession()
+	}
+	return ""
+}
+
+type turnKey struct {
+	session string
+	side    bool
+}
+
+type activeTurn struct {
+	key    turnKey
+	id     string
+	ctx    context.Context
+	cancel context.CancelCauseFunc
+}
+
+var errTurnStopped = errors.New("httpapi: turn stopped by user")
+
+func (s *Server) turnKey(session string, side bool) turnKey {
+	scoped := s.sessionTurn != nil || s.sessionAttachmentTurn != nil || s.sessionCompact != nil || s.subagents != nil
+	if side {
+		scoped = s.sessionSideTurn != nil
+	}
+	if !scoped {
+		session = ""
+	}
+	return turnKey{session: session, side: side}
+}
+
+func (s *Server) startTurn(key turnKey) *activeTurn {
+	s.runsMu.Lock()
+	defer s.runsMu.Unlock()
+	if s.turnContext.Err() != nil || s.runs[key] != nil {
+		return nil
+	}
+	ctx, cancel := context.WithCancelCause(s.turnContext)
+	run := &activeTurn{key: key, id: rand.Text(), ctx: ctx, cancel: cancel}
+	s.runs[key] = run
+	return run
+}
+
+func (s *Server) turnStatus(session string, side bool) statusEvent {
+	s.runsMu.Lock()
+	defer s.runsMu.Unlock()
+	status := statusEvent{Session: session}
+	if run := s.runs[s.turnKey(session, side)]; run != nil {
+		status.Running = true
+		status.TurnID = run.id
+	}
+	return status
+}
+
+func (s *Server) isSessionRunning(session string) bool {
+	return s.turnStatus(session, false).Running
+}
+
+func (s *Server) isSideRunning(session string) bool {
+	return s.turnStatus(session, true).Running
+}
+
+func (s *Server) runningSessionList() []string {
+	s.runsMu.Lock()
+	out := make([]string, 0, len(s.runs))
+	for key := range s.runs {
+		if !key.side && key.session != "" {
+			out = append(out, key.session)
+		}
+	}
+	s.runsMu.Unlock()
+	sort.Strings(out)
+	return out
+}
+
+func (s *Server) currentStatusEvent() statusEvent {
+	status := s.turnStatus(s.currentSessionKey(), false)
+	if s.remoteRouter != nil {
+		if remote, ok := s.remoteRouter.(remoteTurnStopper); ok && status.TurnID == "" {
+			status.TurnID = remote.RemoteTurnID(status.Session)
+		}
+		for _, session := range s.remoteRouter.RunningRemoteSessions() {
+			if session == status.Session {
+				status.Running = true
+				break
+			}
+		}
+	}
+	return status
+}
+
 // serveState answers what a page cannot know after a reload: whether a turn is
 // already running, which facts belong to this server, and which approval boxes
 // should be on screen. The last one is why a reload mid-approval is survivable:
 // the question is still open on the tool goroutine, and only the id was lost.
 func (s *Server) serveState(w http.ResponseWriter, r *http.Request) {
 	pendingQuestions := s.approvals.list()
-	waiting := make([]struct {
-		ID string `json:"id"`
-		Question
-	}, 0, len(pendingQuestions))
+	waiting := make([]PendingQuestionItem, 0, len(pendingQuestions))
 	for _, item := range pendingQuestions {
-		waiting = append(waiting, struct {
-			ID string `json:"id"`
-			Question
-		}{ID: item.id, Question: item.Question})
+		waiting = append(waiting, PendingQuestionItem{ID: item.id, Question: item.Question})
+	}
+	facts, archived := s.currentFacts()
+	curSession := s.currentSessionKey()
+	status := s.turnStatus(curSession, false)
+	running := status.Running
+	runningSessions := s.runningSessionList()
+	activeDeviceID := ""
+	if s.remoteRouter != nil {
+		for _, remoteSess := range s.remoteRouter.RunningRemoteSessions() {
+			if remoteSess == curSession {
+				running = true
+				if remote, ok := s.remoteRouter.(remoteTurnStopper); ok {
+					status.TurnID = remote.RemoteTurnID(curSession)
+				}
+			}
+			runningSessions = append(runningSessions, remoteSess)
+		}
+		sort.Strings(runningSessions)
+		if devID, remoteDir, ok := s.remoteRouter.ActiveRemoteDevice(); ok {
+			activeDeviceID = devID
+			if remoteDir != "" {
+				facts.Directory = remoteDir
+			}
+		}
+		if remotePending := s.remoteRouter.PendingRemoteApprovals(); len(remotePending) > 0 {
+			waiting = append(waiting, remotePending...)
+		}
 	}
 	state := struct {
 		Facts
-		Running bool `json:"running"`
-		Pending []struct {
-			ID string `json:"id"`
-			Question
-		} `json:"pending,omitempty"`
-	}{Facts: s.facts, Running: s.running.Load(), Pending: waiting}
+		DeviceID        string                `json:"deviceId,omitempty"`
+		Session         string                `json:"session,omitempty"`
+		Running         bool                  `json:"running"`
+		TurnID          string                `json:"turnId,omitempty"`
+		RunningSessions []string              `json:"runningSessions,omitempty"`
+		Archived        bool                  `json:"archived,omitempty"`
+		Pending         []PendingQuestionItem `json:"pending,omitempty"`
+	}{
+		Facts:           facts,
+		DeviceID:        activeDeviceID,
+		Session:         curSession,
+		Running:         running,
+		TurnID:          status.TurnID,
+		RunningSessions: runningSessions,
+		Archived:        archived,
+		Pending:         waiting,
+	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	_ = json.NewEncoder(w).Encode(state)
 }
 
-// askRequest is the POST body. One field: a prompt is still the only thing a
-// turn needs, and adding "attachments" here before the transport is proven
-// would be guessing at a shape.
 type askRequest struct {
-	Prompt string `json:"prompt"`
+	Session     string       `json:"session"`
+	Prompt      string       `json:"prompt"`
+	Attachments []Attachment `json:"attachments,omitempty"`
 }
 
 // serveAsk starts one turn and returns at once. The events arrive on the stream
 // because the reader is already there; holding the POST open would only give
 // the window a second, differently-shaped channel to read.
 func (s *Server) serveAsk(w http.ResponseWriter, r *http.Request) {
-	if s.turn == nil {
+	if s.turn == nil && s.sessionTurn == nil && s.remoteRouter == nil {
 		http.Error(w, "httpapi: no turn configured", http.StatusNotImplemented)
 		return
 	}
 	var request askRequest
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&request); err != nil {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 28<<20)).Decode(&request); err != nil {
 		http.Error(w, "httpapi: bad request body: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	if strings.TrimSpace(request.Prompt) == "" {
+	if strings.TrimSpace(request.Prompt) == "" && len(request.Attachments) == 0 {
 		http.Error(w, "httpapi: empty prompt", http.StatusBadRequest)
 		return
 	}
-	// Compare-and-swap rather than a lock: the loser of a double click should
-	// be told, not serialized behind the winner.
-	if !s.running.CompareAndSwap(false, true) {
+	if len(request.Attachments) > 8 {
+		http.Error(w, "httpapi: too many attachments (max 8)", http.StatusBadRequest)
+		return
+	}
+	sessionKey := request.Session
+	if sessionKey == "" {
+		sessionKey = s.currentSessionKey()
+	}
+	if s.remoteRouter != nil {
+		handled, err := s.remoteRouter.ForwardAsk(r.Context(), sessionKey, request.Prompt, request.Attachments)
+		if handled {
+			if err != nil {
+				fail(w, err, http.StatusConflict)
+				return
+			}
+			w.WriteHeader(http.StatusAccepted)
+			return
+		}
+	}
+	action := s.turn
+	switch {
+	case len(request.Attachments) > 0:
+		if s.sessionAttachmentTurn == nil {
+			http.Error(w, "httpapi: attachments are not supported in this mode", http.StatusNotImplemented)
+			return
+		}
+		action = func(ctx context.Context, prompt string, emit func(wire.AgentEvent) error) (Receipt, error) {
+			return s.sessionAttachmentTurn(ctx, sessionKey, prompt, request.Attachments, emit)
+		}
+	case s.sessionTurn != nil:
+		action = func(ctx context.Context, prompt string, emit func(wire.AgentEvent) error) (Receipt, error) {
+			return s.sessionTurn(ctx, sessionKey, prompt, emit)
+		}
+	}
+	if action == nil {
+		http.Error(w, "httpapi: no turn configured", http.StatusNotImplemented)
+		return
+	}
+	run := s.startTurn(s.turnKey(sessionKey, false))
+	if run == nil {
 		http.Error(w, "httpapi: a turn is already running", http.StatusConflict)
 		return
 	}
-
-	prompt := request.Prompt
-	go s.runTurn(prompt)
+	go s.runTurn(run, request.Prompt, action)
 	w.WriteHeader(http.StatusAccepted)
 }
 
-// runTurn drives the injected turn and brackets it with status events, so the
-// page learns the end of a turn even when the turn itself reports nothing.
-func (s *Server) runTurn(prompt string) {
-	defer s.running.Store(false)
-
-	s.publishStatus(statusEvent{Running: true})
-	receipt, err := s.turn(context.Background(), prompt, s.emit)
-	done := statusEvent{Running: false, Receipt: receipt.Fields}
-	if err != nil {
-		done.Error = err.Error()
+func (s *Server) runTurn(run *activeTurn, prompt string, action Turn) {
+	s.publishTurnStatus(run.key.side, statusEvent{Session: run.key.session, TurnID: run.id, Running: true})
+	emit := s.emitForSession
+	if run.key.side {
+		emit = s.emitSideForSession
 	}
-	s.publishStatus(done)
+	receipt, err := action(run.ctx, prompt, func(event wire.AgentEvent) error {
+		return emit(run.key.session, event)
+	})
+	if !s.finishTurn(run, &receipt, err) && !run.key.side && err == nil {
+		s.WakeSubagents(run.key.session)
+	}
 }
 
-// emit publishes one agent event. The signature is the one Turn wants, so the
-// composition root can hand app.Ask's emit straight through.
-func (s *Server) emit(event wire.AgentEvent) error {
-	payload, err := json.Marshal(event)
+func (s *Server) finishTurn(run *activeTurn, receipt *Receipt, err error) bool {
+	s.runsMu.Lock()
+	defer s.runsMu.Unlock()
+	aborted := errors.Is(context.Cause(run.ctx), errTurnStopped)
+	run.cancel(nil)
+	delete(s.runs, run.key)
+	// Publish before another request can acquire the slot and announce its start.
+	if receipt != nil {
+		done := statusEvent{
+			Session:      run.key.session,
+			TurnID:       run.id,
+			Aborted:      aborted,
+			Receipt:      receipt.Fields,
+			EndedAt:      receipt.EndedAt,
+			DurationMs:   receipt.DurationMs,
+			TokensPerSec: receipt.TokensPerSec,
+		}
+		if err != nil && !aborted {
+			done.Error = err.Error()
+		}
+		s.publishTurnStatus(run.key.side, done)
+	}
+	return aborted
+}
+
+func (s *Server) publishTurnStatus(side bool, status statusEvent) {
+	if side {
+		s.publishSideStatus(sideStatus{Open: true, statusEvent: status})
+		return
+	}
+	s.publishStatus(status)
+}
+
+func (s *Server) serveStop(w http.ResponseWriter, r *http.Request) {
+	var request struct {
+		Session string `json:"session"`
+		TurnID  string `json:"turnId"`
+		Side    bool   `json:"side"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<12)).Decode(&request); err != nil {
+		fail(w, err, http.StatusBadRequest)
+		return
+	}
+	if request.TurnID == "" {
+		http.Error(w, "httpapi: turn id is required", http.StatusBadRequest)
+		return
+	}
+	if request.Session == "" {
+		request.Session = s.currentSessionKey()
+	}
+	if remote, ok := s.remoteRouter.(remoteTurnStopper); ok {
+		handled, status, err := remote.ForwardStop(r.Context(), request.Session, request.TurnID, request.Side)
+		if handled {
+			if err != nil {
+				if status < 400 || status > 599 {
+					status = http.StatusBadGateway
+				}
+				http.Error(w, err.Error(), status)
+				return
+			}
+			w.WriteHeader(http.StatusAccepted)
+			return
+		}
+	}
+	key := s.turnKey(request.Session, request.Side)
+	s.runsMu.Lock()
+	run := s.runs[key]
+	matched := run != nil && run.id == request.TurnID
+	if matched {
+		run.cancel(errTurnStopped)
+	}
+	s.runsMu.Unlock()
+	if !matched {
+		http.Error(w, "httpapi: this turn is no longer active", http.StatusConflict)
+		return
+	}
+	w.WriteHeader(http.StatusAccepted)
+}
+
+type scopedAgentEvent struct {
+	wire.AgentEvent
+	Session string `json:"session,omitempty"`
+}
+
+func (s *Server) emitForSession(session string, event wire.AgentEvent) error {
+	payload, err := json.Marshal(scopedAgentEvent{AgentEvent: event, Session: session})
 	if err != nil {
 		return err
 	}
@@ -387,19 +815,16 @@ func (s *Server) emit(event wire.AgentEvent) error {
 	return nil
 }
 
-// statusEvent is the turn-level signal: started, finished, or failed. It is a
-// separate event name rather than a synthetic agent event, because "the turn
-// ended" is not something the agent protocol says — a reader that only knows
-// wire.AgentEvent would have to infer it from agent_end, which a cancelled or
-// failed turn never sends.
-//
-// The receipt rides on the same frame as "not running" because the two are one
-// message to the reader: the turn stopped, and here is what it cost. Sent
-// separately, a window would have to decide which of the two arrived first.
 type statusEvent struct {
-	Running bool     `json:"running"`
-	Error   string   `json:"error,omitempty"`
-	Receipt []string `json:"receipt,omitempty"`
+	Session      string   `json:"session,omitempty"`
+	TurnID       string   `json:"turnId,omitempty"`
+	Running      bool     `json:"running"`
+	Aborted      bool     `json:"aborted,omitempty"`
+	Error        string   `json:"error,omitempty"`
+	Receipt      []string `json:"receipt,omitempty"`
+	EndedAt      int64    `json:"endedAt,omitempty"`
+	DurationMs   int64    `json:"durationMs,omitempty"`
+	TokensPerSec float64  `json:"tokensPerSec,omitempty"`
 }
 
 func (s *Server) publishStatus(status statusEvent) {

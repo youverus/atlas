@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 
 	"pi-go/internal/provider"
@@ -138,14 +139,108 @@ func (p *Provider) endpoint(model wire.Model) string {
 }
 
 func (p *Provider) baseURL(model wire.Model) string {
+	var raw string
 	switch {
 	case model.BaseURL != "":
-		return strings.TrimRight(model.BaseURL, "/")
+		raw = model.BaseURL
 	case p.Compat.BaseURL != "":
-		return strings.TrimRight(p.Compat.BaseURL, "/")
+		raw = p.Compat.BaseURL
 	default:
 		return defaultBaseURL
 	}
+	return NormalizeBaseURL(raw)
+}
+
+// NormalizeBaseURL normalizes an anthropic-messages base URL so compatible
+// endpoints work whether configured as an Anthropic SDK root (for example
+// https://api.anthropic.com, https://open.bigmodel.cn/api/anthropic,
+// https://api.minimaxi.com/anthropic, https://dashscope.aliyuncs.com/apps/anthropic,
+// https://openrouter.ai/api), a full /messages endpoint URL, or a versioned
+// root ending in /v1.
+//
+// Bare loopback origins (http://127.0.0.1:<port>) are preserved as-is so
+// in-process test servers listening at /messages continue to work; user
+// configuration callers should use NormalizeConfiguredBaseURL.
+func NormalizeBaseURL(raw string) string {
+	return normalizeBaseURL(raw, false)
+}
+
+// NormalizeConfiguredBaseURL normalizes a user-configured anthropic-messages
+// base URL, including bare localhost/loopback proxies (for example
+// http://localhost:4000 -> http://localhost:4000/v1).
+func NormalizeConfiguredBaseURL(raw string) string {
+	return normalizeBaseURL(raw, true)
+}
+
+func normalizeBaseURL(raw string, bareLoopbackV1 bool) string {
+	trimmed := strings.TrimRight(strings.TrimSpace(raw), "/")
+	if trimmed == "" {
+		return ""
+	}
+	parsed, err := url.Parse(trimmed)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return trimmed
+	}
+
+	host := strings.ToLower(parsed.Hostname())
+	path := strings.TrimRight(parsed.Path, "/")
+	lowerPath := strings.ToLower(path)
+
+	// Users frequently paste the full .../messages endpoint URL into baseUrl.
+	if lowerPath == "/messages" || strings.HasSuffix(lowerPath, "/messages") {
+		path = strings.TrimRight(path[:len(path)-len("/messages")], "/")
+		lowerPath = strings.ToLower(path)
+	}
+
+	// DeepSeek serves Anthropic Messages under /anthropic/v1 rather than /v1.
+	if host == "api.deepseek.com" {
+		switch lowerPath {
+		case "", "/v1", "/anthropic", "/anthropic/v1":
+			parsed.Path = "/anthropic/v1"
+			parsed.RawPath = ""
+			return parsed.String()
+		}
+	}
+
+	if lowerPath == "" {
+		if bareLoopbackV1 || !isLoopbackHost(host) {
+			parsed.Path = "/v1"
+		} else {
+			parsed.Path = ""
+		}
+		parsed.RawPath = ""
+		return strings.TrimRight(parsed.String(), "/")
+	}
+
+	lastSeg := lowerPath
+	if idx := strings.LastIndexByte(lowerPath, '/'); idx >= 0 {
+		lastSeg = lowerPath[idx+1:]
+	}
+	if isVersionSegment(lastSeg) {
+		parsed.Path = path
+		parsed.RawPath = ""
+		return parsed.String()
+	}
+
+	// Common SDK-style mount roots for Anthropic-compatible APIs omit /v1.
+	switch lastSeg {
+	case "anthropic", "coding", "api":
+		parsed.Path = path + "/v1"
+		parsed.RawPath = ""
+		return parsed.String()
+	default:
+		parsed.Path = path
+		parsed.RawPath = ""
+		return parsed.String()
+	}
+}
+
+func isLoopbackHost(host string) bool {
+	return host == "127.0.0.1" || host == "localhost" || host == "::1"
+}
+
+func isVersionSegment(seg string) bool {
+	return len(seg) >= 2 && seg[0] == 'v' && seg[1] >= '0' && seg[1] <= '9'
 }
 
 func (p *Provider) version() string {

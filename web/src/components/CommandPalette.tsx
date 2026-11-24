@@ -1,29 +1,38 @@
-import type { Command } from "../lib/commands";
+import { useEffect, useRef } from "react";
+import type { PaletteItem } from "../lib/commands";
 
-// The command palette, drawn above the input.
-//
-// It is a list of buttons rather than a listbox because every row is clicked:
-// the reader picks a command and the name lands in the draft, where it can be
-// edited before it runs. That is the terminal's behaviour too — the palette
-// completes the line, it does not fire it.
-//
-// Rows take the mousedown themselves so the textarea keeps focus and the caret
-// stays where it was; without that, clicking a row would blur the box and the
-// insertion would land with the reader's place in the line already lost.
+// Draft completions above the input. Mention navigation leaves focus in the
+// textarea so keyboard and mouse selection both preserve the replacement range.
 export function CommandPalette({
+  id,
   items,
+  kind,
+  selectedIndex,
+  emptyLabel,
   onPick,
   onClose,
 }: {
-  items: Command[];
-  onPick: (name: string) => void;
+  id: string;
+  items: PaletteItem[];
+  kind: "command" | "mention";
+  selectedIndex: number | null;
+  emptyLabel: string;
+  onPick: (index: number) => void;
   onClose: () => void;
 }) {
+  const selected = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    selected.current?.scrollIntoView({ block: "nearest" });
+  }, [selectedIndex]);
+
+  const mentions = kind === "mention";
   return (
     <div
+      id={id}
       className="palette"
-      role="group"
-      aria-label="命令"
+      data-kind={kind}
+      role={mentions ? "listbox" : "group"}
+      aria-label={mentions ? "@ 候选" : "命令"}
       onKeyDown={(event) => {
         if (event.key === "Escape") {
           event.preventDefault();
@@ -32,25 +41,33 @@ export function CommandPalette({
       }}
     >
       {items.length === 0 ? (
-        <div className="palette__empty">没有这个命令</div>
+        <div className="palette__empty" role="status">{emptyLabel}</div>
       ) : (
-        items.map((command) => (
+        items.map((item, index) => (
           <button
-            key={command.name}
+            key={`${item.name}-${item.summary}`}
+            id={`${id}-${index}`}
+            ref={selectedIndex === index ? selected : undefined}
             type="button"
             className="palette__row"
+            role={mentions ? "option" : undefined}
+            tabIndex={mentions ? -1 : undefined}
+            aria-selected={mentions ? selectedIndex === index : undefined}
+            title={mentions ? item.name : undefined}
             onMouseDown={(event) => event.preventDefault()}
-            onClick={() => onPick(command.name)}
+            onClick={() => onPick(index)}
           >
-            <span className="palette__name">{command.name}</span>
-            {command.usage ? <span className="palette__usage">{command.usage}</span> : null}
-            <span className="palette__about">{command.summary}</span>
+            <span className="palette__name">{item.name}</span>
+            {item.usage ? <span className="palette__usage">{item.usage}</span> : null}
+            <span className="palette__about">{item.summary}</span>
           </button>
         ))
       )}
-      <div className="palette__foot">
-        窗口能跑的命令。新对话、归档、恢复在左侧有按钮；/export 与 /resume 还没接进来。Esc 关掉这一栏
-      </div>
+      {kind === "command" ? (
+        <div className="palette__foot">
+          窗口能跑的命令。新对话、归档、恢复在左侧有按钮；/export 与 /resume 还没接进来。Esc 关掉这一栏
+        </div>
+      ) : null}
     </div>
   );
 }

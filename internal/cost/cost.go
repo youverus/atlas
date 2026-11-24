@@ -119,11 +119,20 @@ func (c Cost) Line(usage wire.Usage) string {
 //
 // It is omitted when the model wrote nothing, because "0 tok/s" under an empty
 // answer reads as a failure rather than as a turn that had no words in it.
-func (c Cost) rate(output int) (string, bool) {
+// TokensPerSec reports output tokens per second of writing, or 0 when
+// unavailable.
+func (c Cost) TokensPerSec(output int) float64 {
 	if output <= 0 || c.Wrote <= 0 {
+		return 0
+	}
+	return float64(output) / c.Wrote.Seconds()
+}
+
+func (c Cost) rate(output int) (string, bool) {
+	value := c.TokensPerSec(output)
+	if value <= 0 {
 		return "", false
 	}
-	value := float64(output) / c.Wrote.Seconds()
 	if value >= 10 {
 		return fmt.Sprintf("%d tok/s", int(math.Round(value))), true
 	}

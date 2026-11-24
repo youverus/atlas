@@ -1,0 +1,176 @@
+/* Atlas 侧边面板：跟随浏览器的明暗模式，视觉与桌面端同一套克制风格。 */
+:root {
+  color-scheme: light dark;
+  --bg: #ffffff;
+  --surface: #f5f6f8;
+  --line: rgba(0, 0, 0, 0.1);
+  --text: #1c1e21;
+  --text-dim: #6b7280;
+  --accent: #3b6ef6;
+  --danger: #c62828;
+  --ok: #1a7f37;
+  --radius: 10px;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #17181c;
+    --surface: #22242a;
+    --line: rgba(255, 255, 255, 0.12);
+    --text: #e8e9ec;
+    --text-dim: #9aa1ab;
+  }
+}
+
+* { box-sizing: border-box; }
+body {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  margin: 0;
+  font: 13px/1.6 -apple-system, "PingFang SC", "Segoe UI", sans-serif;
+  color: var(--text);
+  background: var(--bg);
+}
+
+.head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--line);
+  flex: none;
+}
+.head__title { font-weight: 600; }
+.head__model {
+  color: var(--text-dim);
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.spacer { flex: 1; }
+
+.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--text-dim); flex: none; }
+.dot[data-state="connected"] { background: var(--ok); }
+.dot[data-state="error"] { background: var(--danger); }
+
+.mini {
+  border: none;
+  background: transparent;
+  color: var(--text-dim);
+  font: inherit;
+  font-size: 12px;
+  padding: 2px 6px;
+  border-radius: 6px;
+  cursor: pointer;
+  flex: none;
+}
+.mini:hover { background: var(--surface); color: var(--text); }
+
+.page-chip {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface);
+  font-size: 12px;
+  flex: none;
+}
+.page-chip__title {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-dim);
+}
+
+.messages {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.msg { max-width: 92%; border-radius: var(--radius); padding: 8px 12px; overflow-wrap: break-word; }
+.msg--user { align-self: flex-end; background: var(--accent); color: #fff; white-space: pre-wrap; }
+.msg--assistant { align-self: flex-start; background: var(--surface); }
+.msg--assistant pre {
+  overflow-x: auto;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 8px;
+  font-size: 12px;
+}
+.msg--assistant code { font-family: ui-monospace, monospace; font-size: 12px; }
+.msg--assistant p { margin: 0 0 8px; }
+.msg--assistant p:last-child, .msg--assistant ul:last-child { margin-bottom: 0; }
+.msg--assistant a { color: var(--accent); }
+.msg--tool {
+  align-self: flex-start;
+  background: transparent;
+  border: 1px dashed var(--line);
+  color: var(--text-dim);
+  font-size: 12px;
+  padding: 4px 10px;
+}
+.msg--tool[data-state="error"] { color: var(--danger); border-color: var(--danger); }
+.msg--receipt, .msg--error {
+  align-self: center;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 11px;
+  padding: 2px 8px;
+}
+.msg--error { color: var(--danger); }
+
+.approvals { flex: none; padding: 0 12px; display: flex; flex-direction: column; gap: 8px; }
+.approval {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+  background: var(--surface);
+  font-size: 12px;
+}
+.approval__row { display: flex; gap: 8px; margin-top: 8px; }
+.approval button {
+  border: none;
+  border-radius: 8px;
+  padding: 5px 12px;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  background: var(--accent);
+  color: #fff;
+}
+.approval button[data-act="deny"] { background: var(--danger); }
+.approval button[data-act="always"] { background: transparent; color: var(--text); border: 1px solid var(--line); }
+
+.composer { flex: none; border-top: 1px solid var(--line); padding: 8px 12px 12px; }
+.composer__actions { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+.notice { color: var(--danger); font-size: 11px; }
+.composer__row { display: flex; gap: 8px; align-items: flex-end; }
+#input {
+  flex: 1;
+  resize: none;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 8px 10px;
+  font: inherit;
+  background: transparent;
+  color: inherit;
+}
+.send {
+  border: none;
+  border-radius: var(--radius);
+  padding: 8px 16px;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+  background: var(--accent);
+  color: #fff;
+}
+.send:disabled { opacity: 0.5; cursor: default; }

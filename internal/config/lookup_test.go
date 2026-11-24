@@ -137,6 +137,30 @@ func TestSelectionsAreOrdered(t *testing.T) {
 	}
 }
 
+func TestResolveSubagentModel(t *testing.T) {
+	cfg := testConfig()
+	if _, _, configured, err := cfg.ResolveSubagent("explorer"); configured || err != nil {
+		t.Fatalf("unset model should defer to the parent: configured=%v err=%v", configured, err)
+	}
+	cfg.Subagents = &Subagents{
+		Default: SubagentModel{Model: "beta/b1", ThinkingLevel: "off"},
+		Roles:   map[string]SubagentModel{"explorer": {Model: "a1", ThinkingLevel: "high"}},
+	}
+	for _, tt := range []struct{ role, model, thinking string }{
+		{"explorer", "alpha/a1", "high"},
+		{"verifier", "beta/b1", "off"},
+	} {
+		selection, thinking, configured, err := cfg.ResolveSubagent(tt.role)
+		if selection.Name() != tt.model || thinking != tt.thinking || !configured || err != nil {
+			t.Fatalf("%s resolved to %s %s, configured=%v err=%v", tt.role, selection.Name(), thinking, configured, err)
+		}
+	}
+	cfg.Subagents.Roles["explorer"] = SubagentModel{Model: "shared"}
+	if _, _, configured, err := cfg.ResolveSubagent("explorer"); !configured || err == nil || !strings.Contains(err.Error(), "subagents.roles.explorer.model") {
+		t.Fatalf("ambiguous explicit model: configured=%v err=%v", configured, err)
+	}
+}
+
 func TestLookupKeepsProviderData(t *testing.T) {
 	// The selection carries the whole provider because the credential and
 	// endpoint live there, not on the model.

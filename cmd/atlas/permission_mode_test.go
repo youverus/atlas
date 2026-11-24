@@ -133,7 +133,7 @@ func TestPermissionNeedsAMenuOrPrints(t *testing.T) {
 			}
 			return tui.PickAnswer{Value: permission.ModeAuto, Taken: true}
 		}
-		done, err := replCommand(context.Background(), application, state, "/permission", models{}, newSessionPicker(application, ""), pick, emptyPrompts(), out, render, mcpState{}, nil, nil)
+		done, err := replCommand(context.Background(), application, state, "/permission", models{}, newSessionPicker(application, ""), pick, emptyPrompts(), out, render, mcpState{}, nil)
 		if done {
 			t.Fatal("/permission ended the session")
 		}

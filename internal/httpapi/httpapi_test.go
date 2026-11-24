@@ -234,7 +234,7 @@ func TestASecondAskIsRefusedWhileOneRuns(t *testing.T) {
 	// The latch must come back, or the window is unusable after one turn.
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		if !server.running.Load() {
+		if !server.isSessionRunning("") {
 			return
 		}
 		time.Sleep(5 * time.Millisecond)

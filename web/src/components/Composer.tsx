@@ -1,62 +1,78 @@
-import { useEffect, useRef, useState } from "react";
-import { leadingCommand, matches } from "../lib/commands";
+import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
+import type { ChangeEvent, ReactNode } from "react";
+import { api, type AttachmentPayload, type DirListing } from "../api";
+import { formatBytes, hasDraggedFiles, MAX_ATTACHMENTS, readStagedFile, transferredFiles, type AttachmentKind, type StagedAttachment } from "../lib/composerAttachments";
+import { inPromptText, leadingCommand, matches, roleMatches, type PaletteItem } from "../lib/commands";
+import { matchingPaths, pathInsertion, pathMention, type PathCompletionScope } from "../lib/pathCompletion";
 import { CommandPalette } from "./CommandPalette";
+
+interface DirectoryRequest {
+  fileScope: PathCompletionScope;
+  directory: string;
+}
+
+interface CompletionItem extends PaletteItem {
+  start: number;
+  end: number;
+  path?: ReturnType<typeof pathInsertion>;
+  isDir?: boolean;
+}
 
 // The input. Enter sends, Shift+Enter breaks the line, and the box grows with
 // the draft up to a ceiling: a prompt that scrolls inside a 44px box is a
 // prompt the reader cannot proofread.
-//
-// Enter is not always a send, though: while an input method is composing, the
-// same key commits the candidate the reader is choosing. The window runs in a
-// system webview, where that keypress reports isComposing false and arrives
-// after compositionend, so the state is tracked here rather than read off the
-// event — a candidate being chosen in Chinese must never post the half-written
-// sentence.
-//
-// A leading slash opens the command palette above the box. It lists only what
-// the window can run, and picking a row completes the line rather than firing
-// it: the reader still presses Enter, which is the same gesture that runs a
-// command in the terminal.
-//
-// The command itself is painted, not just accepted: a line that will be
-// interpreted as a command looks different from a line that will be sent to the
-// model, and the reader can see that before pressing Enter. The paint is a
-// second, transparent-text layer behind the textarea rather than styled text
-// inside it, because a textarea cannot hold a span. Only the name is marked —
-// the argument stays plain — and only an exact name counts, so a half-typed
-// prefix is not painted as something it is not yet.
 export function Composer({
   disabled,
+  locked = false,
+  allowAttachments = false,
+  fileScope,
   onSend,
-  seed,
+  onStop,
+  stopping = false,
+  onDraftChange,
   plain,
   placeholder,
+  footer,
+  footerRight,
+  footerOverlay,
 }: {
   disabled: boolean;
-  onSend: (text: string) => void;
-  // Text to put in the box, replacing the draft. A new object every time, so
-  // being handed the same sentence twice still lands: the identity is the
-  // signal, not the text.
-  seed?: { text: string } | null;
-  /** 侧面板里的那个输入框。它只把句子发给侧对话，没有命令表可以补全，所以两
-   *  件事一起关掉：不画补全面板，也不把它认出来的名字标成命令。列一张点不动
-   *  的表比不列更糟——会让读者以为那些命令在这里能跑。 */
+  locked?: boolean;
+  allowAttachments?: boolean;
+  fileScope?: PathCompletionScope;
+  onSend: (text: string, attachments?: AttachmentPayload[]) => void;
+  onStop?: () => void;
+  stopping?: boolean;
+  onDraftChange?: (hasDraft: boolean) => void;
   plain?: boolean;
-  /** 占位文字。两个输入框要能一眼分清「这句话发给谁」，而位置在窄窗口里不够。 */
   placeholder?: string;
+  footer?: ReactNode;
+  footerRight?: ReactNode;
+  footerOverlay?: ReactNode;
 }) {
   const [value, setValue] = useState("");
-  // Esc closes the palette without touching the draft. Typing reopens it, which
-  // is why this is cleared in onChange rather than by an effect on the value:
-  // picking a row also changes the value, and an effect would reopen the panel
-  // the pick just closed.
-  const [dismissed, setDismissed] = useState(false);
+  const [caret, setCaret] = useState<number | null>(0);
+  const [focused, setFocused] = useState(false);
+  const [dismissed, setDismissed] = useState<number | null>(null);
+  const [activeCandidate, setActiveCandidate] = useState<{ index: number; request: DirectoryRequest | null } | null>(null);
+  const [compositionActive, setCompositionActive] = useState(false);
+  const [attachMenuOpen, setAttachMenuOpen] = useState(false);
+  const [attachments, setAttachments] = useState<StagedAttachment[]>([]);
+  const [attachError, setAttachError] = useState("");
+  const [stagingAttachments, setStagingAttachments] = useState(false);
+  const [draggingFiles, setDraggingFiles] = useState(false);
+  const paletteId = useId();
+  const selectedCaret = useRef<number | null>(null);
+  const stagedFiles = useRef<StagedAttachment[]>([]);
+  const staging = useRef({ queue: Promise.resolve(), pending: 0 });
+  const dragDepth = useRef(0);
   const area = useRef<HTMLTextAreaElement>(null);
   const mirror = useRef<HTMLDivElement>(null);
+  const attachWrapRef = useRef<HTMLDivElement>(null);
+  const imageInputRef = useRef<HTMLInputElement>(null);
+  const pdfInputRef = useRef<HTMLInputElement>(null);
+  const textInputRef = useRef<HTMLInputElement>(null);
   const composing = useRef(false);
-  // True for exactly the keypress that ends a composition. WebKit fires
-  // compositionend before the keydown of the committing Enter, so a flag that
-  // was cleared with the composition would already be gone by then.
   const justComposed = useRef(false);
 
   useEffect(() => {
@@ -66,128 +82,488 @@ export function Composer({
     node.style.height = `${Math.min(node.scrollHeight, 200)}px`;
   }, [value]);
 
-  // A fork in front of a prompt hands that prompt back, and the point of handing
-  // it back is to change it: the caret goes to the end so the reader continues
-  // the sentence instead of selecting and retyping it. The palette is dismissed
-  // on the way in — a message that happens to start with a slash would otherwise
-  // open a command list over the sentence the reader is about to edit.
   useEffect(() => {
-    if (!seed) return;
-    setValue(seed.text);
-    setDismissed(true);
-    const node = area.current;
-    if (!node) return;
-    node.focus();
-    window.requestAnimationFrame(() => node.setSelectionRange(seed.text.length, seed.text.length));
-  }, [seed]);
+    if (!attachMenuOpen) return;
+    const onPointerDown = (event: MouseEvent) => {
+      if (attachWrapRef.current && !attachWrapRef.current.contains(event.target as Node)) {
+        setAttachMenuOpen(false);
+      }
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setAttachMenuOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", onPointerDown);
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("mousedown", onPointerDown);
+      document.removeEventListener("keydown", onKeyDown);
+    };
+  }, [attachMenuOpen]);
 
-  // A turn in flight cannot run a command — send is refused while disabled — so
-  // offering one would be a panel whose rows do nothing.
-  const palette = disabled || dismissed || plain ? null : matches(value);
-  const command = plain ? null : leadingCommand(value);
+  const blocked = disabled || locked;
+  const hasAttachments = attachments.length > 0 || stagingAttachments;
+  const hasDraft = value.length > 0 || hasAttachments || compositionActive;
+  useEffect(() => onDraftChange?.(hasDraft), [hasDraft, onDraftChange]);
+
+  const trimmedStart = value.trimStart();
+  const command = plain || locked || hasAttachments ? null : leadingCommand(value);
+  const canPick = !blocked && !compositionActive;
+  const slashItems = canPick && !plain && !hasAttachments ? matches(value) : null;
+  const rawMention = canPick && focused && !slashItems && caret !== null ? pathMention(value, caret) : null;
+  const mention = rawMention && inPromptText(value.slice(0, rawMention.start)) ? rawMention : null;
+  const rawRole = canPick && focused && !plain && !trimmedStart.startsWith("/") && caret !== null
+    ? roleMatches(value, caret)
+    : null;
+  const role = rawRole && (!mention || rawRole.start === mention.start) ? rawRole : null;
+  const directory = mention?.start === dismissed ? undefined : mention?.directory;
+  const request = useMemo<DirectoryRequest | null>(
+    () => fileScope && directory !== undefined ? { fileScope, directory } : null,
+    [fileScope, directory],
+  );
+  const [result, setResult] = useState<{ request: DirectoryRequest; listing?: DirListing }>();
+
+  useEffect(() => {
+    if (!request) return;
+    const { fileScope, directory } = request;
+    const controller = new AbortController();
+    void api.files(directory.replace(/\/$/, ""), controller.signal).then((listing) => {
+      if (controller.signal.aborted) return;
+      const expectedRoot = fileScope.directory?.replace(/\/+$/, "");
+      const actualRoot = listing.root?.replace(/\/+$/, "");
+      const wrongRoot = expectedRoot !== undefined && actualRoot !== undefined && expectedRoot !== actualRoot;
+      setResult({ request, listing: wrongRoot ? undefined : listing });
+    }).catch(() => {
+      if (!controller.signal.aborted) setResult({ request });
+    });
+    return () => controller.abort();
+  }, [request]);
+
+  const loadingPaths = Boolean(request && result?.request !== request);
+  const listing = request && result?.request === request ? result.listing : undefined;
+  const pathItems = mention ? matchingPaths(listing, mention.prefix).map((entry) => {
+    const { start, end } = mention;
+    // A root path can have the same spelling as a bare subagent role.
+    const bare = `@${entry.path}`;
+    const reserved = !entry.isDir && roleMatches(bare, bare.length)?.items.some((item) => item.name === bare);
+    const path = pathInsertion(entry.path, entry.isDir, reserved);
+    return { name: path.text, summary: entry.isDir ? "目录" : "文件", start, end, path, isDir: entry.isDir };
+  }) : [];
+  const slashStart = value.length - trimmedStart.length;
+  const paletteStart = slashItems ? slashStart : role?.start ?? (request ? mention?.start : undefined);
+  const paletteKind = slashItems ? "command" : "mention";
+  const showPalette = paletteStart !== undefined && paletteStart !== dismissed;
+  const items: CompletionItem[] = slashItems
+    ? slashItems.map((item) => ({ ...item, start: slashStart, end: value.length }))
+    : [...(role ? role.items.map((item) => ({ ...item, start: role.start, end: role.end })) : []), ...pathItems];
+  const selectedIndex = activeCandidate?.request === request && activeCandidate.index < items.length
+    ? activeCandidate.index
+    : null;
+
+  const syncCaret = (node: HTMLTextAreaElement) => {
+    const next = node.selectionStart === node.selectionEnd ? node.selectionStart : null;
+    if (next !== caret) setActiveCandidate(null);
+    setCaret(next);
+  };
+
+  useLayoutEffect(() => {
+    const position = selectedCaret.current;
+    if (position === null) return;
+    selectedCaret.current = null;
+    area.current?.setSelectionRange(position, position);
+  });
+
+  useEffect(() => () => {
+    staging.current = { queue: Promise.resolve(), pending: 0 };
+  }, []);
+
+  const updateAttachments = (next: StagedAttachment[]) => {
+    stagedFiles.current = next;
+    setAttachments(next);
+  };
 
   const send = () => {
     const text = value.trim();
-    if (!text || disabled) return;
-    onSend(text);
+    const files = stagedFiles.current;
+    if ((!text && files.length === 0) || blocked || staging.current.pending > 0 || composing.current) return;
+    const payloads =
+      files.length > 0
+        ? files.map(({ kind, name, mimeType, data }) => ({
+            kind,
+            name,
+            ...(mimeType ? { mimeType } : {}),
+            data,
+          }))
+        : undefined;
+    onSend(text, payloads);
     setValue("");
-    setDismissed(false);
+    updateAttachments([]);
+    setAttachError("");
+    setAttachMenuOpen(false);
+    setCaret(0);
+    setDismissed(null);
+    setActiveCandidate(null);
   };
 
-  // pick completes the line with the command's name and leaves the caret at its
-  // end, ready for an argument or for Enter.
-  const pick = (name: string) => {
-    setValue(name);
-    setDismissed(true);
-    const node = area.current;
-    if (!node) return;
-    node.focus();
-    window.requestAnimationFrame(() => node.setSelectionRange(name.length, name.length));
+  const pick = (index: number) => {
+    const item = items[index];
+    if (!showPalette || !item || composing.current || justComposed.current) return;
+    const { start, end, name, path, isDir } = item;
+    const next = value.slice(0, start) + name + value.slice(end);
+    const position = start + (path?.caretOffset ?? name.length);
+    area.current?.focus();
+    selectedCaret.current = position;
+    setValue(next);
+    setCaret(position);
+    setDismissed(isDir ? null : start);
+    setActiveCandidate(null);
   };
+
+  const triggerPicker = (kind: AttachmentKind) => {
+    setAttachMenuOpen(false);
+    setAttachError("");
+    if (kind === "image") imageInputRef.current?.click();
+    else if (kind === "pdf") pdfInputRef.current?.click();
+    else textInputRef.current?.click();
+  };
+
+  const stageFiles = (files: File[], kind?: AttachmentKind, transferError = "") => {
+    if (!allowAttachments || locked || (files.length === 0 && !transferError)) return;
+    setAttachMenuOpen(false);
+    setAttachError("");
+    area.current?.focus();
+
+    // Process gestures in order so every batch shares the remaining slots.
+    const jobs = staging.current;
+    jobs.pending += 1;
+    setStagingAttachments(true);
+    jobs.queue = jobs.queue.then(async () => {
+      if (staging.current !== jobs) return;
+      let error = transferError;
+      for (const file of files) {
+        if (stagedFiles.current.length >= MAX_ATTACHMENTS) {
+          error = `单条消息最多附加 ${MAX_ATTACHMENTS} 个文件`;
+          break;
+        }
+        try {
+          const parsed = await readStagedFile(file, kind);
+          if (staging.current !== jobs) return;
+          updateAttachments([...stagedFiles.current, parsed]);
+        } catch (cause) {
+          if (staging.current !== jobs) return;
+          error = cause instanceof Error ? cause.message : String(cause);
+        }
+      }
+      if (error) setAttachError(error);
+    }).finally(() => {
+      jobs.pending -= 1;
+      if (staging.current === jobs && jobs.pending === 0) setStagingAttachments(false);
+    });
+  };
+
+  const handleFilesSelected = (kind: AttachmentKind, event: ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(event.currentTarget.files ?? []);
+    event.currentTarget.value = "";
+    stageFiles(files, kind);
+  };
+
+  const closePalette = () => {
+    if (paletteStart !== undefined) setDismissed(paletteStart);
+    setActiveCandidate(null);
+  };
+
+  const hasToolbar = Boolean(allowAttachments || footer || footerRight);
+
+  const attachControl = allowAttachments ? (
+    <div className="composer__attach" ref={attachWrapRef}>
+      <button
+        type="button"
+        className="attach-trigger"
+        disabled={locked}
+        data-active={attachMenuOpen ? "true" : undefined}
+        aria-expanded={attachMenuOpen}
+        aria-haspopup="menu"
+        aria-label="添加附件"
+        title="附加图片、PDF 或文本文件"
+        onClick={() => setAttachMenuOpen((open) => !open)}
+      >
+        <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+          <path
+            d="M8 3.25v9.5M3.25 8h9.5"
+            stroke="currentColor"
+            strokeWidth="1.7"
+            strokeLinecap="round"
+          />
+        </svg>
+      </button>
+      {attachMenuOpen ? (
+        <div className="attach-menu" role="menu" aria-label="选择附件类型">
+          <button
+            type="button"
+            role="menuitem"
+            className="attach-menu__item"
+            onClick={() => triggerPicker("image")}
+          >
+            <span className="attach-menu__title">图片</span>
+            <span className="attach-menu__meta">PNG · JPG · GIF · WebP</span>
+          </button>
+          <button
+            type="button"
+            role="menuitem"
+            className="attach-menu__item"
+            onClick={() => triggerPicker("pdf")}
+          >
+            <span className="attach-menu__title">PDF 文档</span>
+            <span className="attach-menu__meta">.pdf</span>
+          </button>
+          <button
+            type="button"
+            role="menuitem"
+            className="attach-menu__item"
+            onClick={() => triggerPicker("text")}
+          >
+            <span className="attach-menu__title">文本文件</span>
+            <span className="attach-menu__meta">TXT · MD · 代码 · JSON</span>
+          </button>
+        </div>
+      ) : null}
+
+      <input
+        ref={imageInputRef}
+        type="file"
+        accept="image/png,image/jpeg,image/gif,image/webp"
+        multiple
+        hidden
+        onChange={(event) => void handleFilesSelected("image", event)}
+      />
+      <input
+        ref={pdfInputRef}
+        type="file"
+        accept=".pdf,application/pdf"
+        multiple
+        hidden
+        onChange={(event) => void handleFilesSelected("pdf", event)}
+      />
+      <input
+        ref={textInputRef}
+        type="file"
+        accept=".txt,.md,.markdown,.json,.jsonl,.csv,.tsv,.log,.yaml,.yml,.toml,.xml,.html,.htm,.css,.scss,.js,.jsx,.ts,.tsx,.go,.py,.rs,.java,.c,.cc,.cpp,.h,.hpp,.sh,.zsh,.sql,.env,.ini,.conf,text/*"
+        multiple
+        hidden
+        onChange={(event) => void handleFilesSelected("text", event)}
+      />
+    </div>
+  ) : null;
+
+  const sendControl =
+    disabled && !locked ? (
+      <button
+        type="button"
+        className="send"
+        onClick={onStop}
+        disabled={stopping || !onStop}
+        aria-label={stopping ? "正在停止本轮" : "停止本轮"}
+        title={stopping ? "正在停止本轮" : onStop ? "停止本轮（Esc）" : "等待服务提供可停止的轮次"}
+      >
+        <span className="send__stop-icon" aria-hidden="true" />
+      </button>
+    ) : (
+      <button
+        type="button"
+        className="send"
+        onClick={send}
+        disabled={blocked || stagingAttachments || (value.trim().length === 0 && attachments.length === 0)}
+        aria-label="发送"
+      >
+        <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+          <path
+            d="M8 12.75V3.5M4.25 7L8 3.25L11.75 7"
+            stroke="currentColor"
+            strokeWidth="1.8"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+        </svg>
+      </button>
+    );
 
   return (
     <div className="composer">
       <div className="composer__inner">
-        {palette ? (
-          <CommandPalette items={palette} onPick={pick} onClose={() => setDismissed(true)} />
+        {showPalette ? (
+          <CommandPalette
+            id={paletteId}
+            items={items}
+            kind={paletteKind}
+            selectedIndex={selectedIndex}
+            emptyLabel={slashItems ? "没有这个命令" : loadingPaths ? "正在读取目录…" : listing ? "没有匹配的路径" : "无法读取目录"}
+            onPick={pick}
+            onClose={closePalette}
+          />
         ) : null}
-        <div className="composer__box">
-          <div className="composer__field">
-            {command ? (
-              // The paint layer. Its text is transparent — the glyphs the reader
-              // sees are the textarea's own — so the two never disagree about
-              // anything except where the highlight box goes. It is the same box
-              // with the same metrics, and it scrolls with the textarea.
-              <div className="composer__mirror" aria-hidden="true" ref={mirror}>
-                {command.lead}
-                <mark className="composer__command">{command.name}</mark>
-                {command.rest}
-              </div>
-            ) : null}
-            <textarea
-              ref={area}
-              rows={1}
-              value={value}
-              placeholder={placeholder ?? "问点什么…  / 看命令"}
-              autoFocus
-              onChange={(event) => {
-                setValue(event.target.value);
-                setDismissed(false);
-              }}
-              onScroll={(event) => {
-                // A long draft scrolls inside the box once it passes the
-                // ceiling; the paint has to follow it up or the highlight stays
-                // behind on the first line.
-                const layer = mirror.current;
-                if (layer) layer.scrollTop = event.currentTarget.scrollTop;
-              }}
-              onCompositionStart={() => {
-                composing.current = true;
-              }}
-              onCompositionEnd={() => {
-                composing.current = false;
-                justComposed.current = true;
-                // The flag outlives this task and nothing else: the committing
-                // keypress is dispatched in the same one.
-                window.setTimeout(() => {
-                  justComposed.current = false;
-                }, 0);
-              }}
-              onKeyDown={(event) => {
-                if (event.key === "Escape" && palette) {
+        {attachError ? <div className="composer__attach-error" role="status">{attachError}</div> : null}
+        <div
+          className="composer__box"
+          data-locked={locked ? "true" : undefined}
+          data-toolbar={hasToolbar ? "true" : undefined}
+          data-dragging={draggingFiles && !locked ? "true" : undefined}
+          aria-busy={stagingAttachments || undefined}
+          onPaste={allowAttachments ? (event) => {
+            const { files, hasDirectory } = transferredFiles(event.clipboardData);
+            if (files.length === 0 && !hasDirectory) return;
+            event.preventDefault();
+            stageFiles(files, undefined, hasDirectory ? "仅支持粘贴文件" : "");
+          } : undefined}
+          onDragEnter={allowAttachments ? (event) => {
+            if (!hasDraggedFiles(event.dataTransfer)) return;
+            event.preventDefault();
+            dragDepth.current += 1;
+            if (!locked) setDraggingFiles(true);
+          } : undefined}
+          onDragOver={allowAttachments ? (event) => {
+            if (!hasDraggedFiles(event.dataTransfer)) return;
+            event.preventDefault();
+            event.dataTransfer.dropEffect = locked ? "none" : "copy";
+          } : undefined}
+          onDragLeave={allowAttachments ? () => {
+            dragDepth.current = Math.max(0, dragDepth.current - 1);
+            if (dragDepth.current === 0) setDraggingFiles(false);
+          } : undefined}
+          onDrop={allowAttachments ? (event) => {
+            dragDepth.current = 0;
+            setDraggingFiles(false);
+            const { files, hasDirectory } = transferredFiles(event.dataTransfer);
+            if (files.length === 0 && !hasDirectory && !hasDraggedFiles(event.dataTransfer)) return;
+            event.preventDefault();
+            stageFiles(files, undefined, hasDirectory ? "仅支持拖入文件" : "");
+          } : undefined}
+        >
+          {attachments.length > 0 ? (
+            <div className="composer__attachments" aria-label="已附加文件">
+              {attachments.map((item) => (
+                <div className="attach-chip" key={item.id}>
+                  {item.previewUrl ? (
+                    <img className="attach-chip__thumb" src={item.previewUrl} alt={item.name} />
+                  ) : (
+                    <span className="attach-chip__kind">
+                      {item.kind === "pdf" ? "PDF" : "文本"}
+                    </span>
+                  )}
+                  <span className="attach-chip__name" title={item.name}>
+                    {item.name}
+                  </span>
+                  <span className="attach-chip__size">{formatBytes(item.size)}</span>
+                  <button
+                    type="button"
+                    className="attach-chip__remove"
+                    aria-label={`移除 ${item.name}`}
+                    onClick={() => updateAttachments(stagedFiles.current.filter((file) => file.id !== item.id))}
+                  >
+                    ✕
+                  </button>
+                </div>
+              ))}
+            </div>
+          ) : null}
+
+          <div className="composer__row">
+            <div className="composer__field">
+              {command ? (
+                <div className="composer__mirror" aria-hidden="true" ref={mirror}>
+                  {command.lead}
+                  <mark className="composer__command">{command.name}</mark>
+                  {command.rest}
+                </div>
+              ) : null}
+              <textarea
+                ref={area}
+                rows={1}
+                value={locked ? "" : value}
+                disabled={locked}
+                placeholder={placeholder ?? "问点什么…  / 看命令  @ 选文件或子代理"}
+                aria-controls={showPalette && paletteKind === "mention" ? paletteId : undefined}
+                aria-activedescendant={showPalette && selectedIndex !== null ? `${paletteId}-${selectedIndex}` : undefined}
+                autoFocus
+                onFocus={(event) => {
+                  setFocused(true);
+                  syncCaret(event.currentTarget);
+                }}
+                onBlur={() => {
+                  setFocused(false);
+                  setActiveCandidate(null);
+                }}
+                onChange={(event) => {
+                  setValue(event.currentTarget.value);
+                  syncCaret(event.currentTarget);
+                  setDismissed(null);
+                  setActiveCandidate(null);
+                }}
+                onSelect={(event) => syncCaret(event.currentTarget)}
+                onScroll={(event) => {
+                  const layer = mirror.current;
+                  if (layer) layer.scrollTop = event.currentTarget.scrollTop;
+                }}
+                onCompositionStart={() => {
+                  composing.current = true;
+                  setCompositionActive(true);
+                }}
+                onCompositionEnd={(event) => {
+                  composing.current = false;
+                  justComposed.current = true;
+                  setCompositionActive(false);
+                  syncCaret(event.currentTarget);
+                  window.setTimeout(() => {
+                    justComposed.current = false;
+                  }, 0);
+                }}
+                onKeyDown={(event) => {
+                  const native = event.nativeEvent;
+                  if (composing.current || justComposed.current || native.isComposing || native.keyCode === 229) {
+                    if (event.key === "Enter") justComposed.current = false;
+                    if (event.key === "Escape") event.stopPropagation();
+                    return;
+                  }
+                  if (event.key === "Escape" && showPalette) {
+                    event.preventDefault();
+                    closePalette();
+                    return;
+                  }
+                  if (showPalette && paletteKind === "mention" && items.length > 0 &&
+                      !event.shiftKey && !event.altKey && !event.metaKey && !event.ctrlKey) {
+                    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+                      event.preventDefault();
+                      const step = event.key === "ArrowDown" ? 1 : -1;
+                      const from = selectedIndex ?? (step === 1 ? -1 : 0);
+                      setActiveCandidate({ index: (from + step + items.length) % items.length, request });
+                      return;
+                    }
+                    if (event.key === "Tab" || (event.key === "Enter" && selectedIndex !== null)) {
+                      event.preventDefault();
+                      pick(selectedIndex ?? 0);
+                      return;
+                    }
+                  }
+                  if (event.key !== "Enter" || event.shiftKey) return;
                   event.preventDefault();
-                  setDismissed(true);
-                  return;
-                }
-                if (event.key !== "Enter" || event.shiftKey) return;
-                const native = event.nativeEvent;
-                // 229 is what engines report when an IME owns the key.
-                if (composing.current || justComposed.current || native.isComposing || native.keyCode === 229) {
-                  justComposed.current = false;
-                  return;
-                }
-                event.preventDefault();
-                send();
-              }}
-            />
+                  send();
+                }}
+              />
+            </div>
+            {!hasToolbar ? sendControl : null}
           </div>
-          <button
-            type="button"
-            className="send"
-            onClick={send}
-            disabled={disabled || value.trim().length === 0}
-            aria-label="发送"
-          >
-            ↑
-          </button>
+          {hasToolbar ? (
+            <div className="composer__foot">
+              {attachControl}
+              {footer ? <div className="composer__facts">{footer}</div> : null}
+              <div className="composer__right">
+                {footerRight}
+                {sendControl}
+              </div>
+            </div>
+          ) : null}
         </div>
-        <div className="composer__hint">
-          <span className="kbd">Enter</span>
-          <span>发送</span>
-          <span className="kbd">Shift</span>
-          <span className="kbd">Enter</span>
-          <span>换行</span>
-        </div>
+        {footerOverlay}
       </div>
     </div>
   );

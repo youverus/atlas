@@ -6,6 +6,7 @@ package main
 import (
 	"context"
 	"encoding/base64"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -49,12 +50,8 @@ func TestParseAttachRefs(t *testing.T) {
 			if err != nil {
 				t.Fatalf("parse: %v", err)
 			}
-			got := make([]string, 0, len(refs))
-			for _, ref := range refs {
-				got = append(got, ref.token)
-			}
-			if strings.Join(got, "|") != strings.Join(tc.want, "|") {
-				t.Fatalf("refs = %v, want %v", got, tc.want)
+			if strings.Join(refs, "|") != strings.Join(tc.want, "|") {
+				t.Fatalf("refs = %v, want %v", refs, tc.want)
 			}
 		})
 	}
@@ -256,6 +253,11 @@ func TestAttachSuggestionsKeepTheTypedPrefix(t *testing.T) {
 		t.Fatalf("name = %q, want the quote left open for the next segment", picks[0].Name)
 	}
 
+	closed := `@"my dir/file.png"`
+	if picks := attachSuggestions("look at "+closed, cwd); len(picks) != 1 || picks[0].Name != closed || !isAttachImage(picks[0].Path) {
+		t.Fatalf("quoted image picks = %+v, want the exact image", picks)
+	}
+
 	// Absolute prefixes stay absolute.
 	if got := pickNames(attachSuggestions("look at @"+filepath.Dir(cwd)+"/", cwd)); len(got) == 0 {
 		t.Fatalf("an absolute prefix offered nothing")
@@ -283,9 +285,7 @@ func TestAttachSuggestionsOnlyAtTheEndOfTheLine(t *testing.T) {
 	}
 }
 
-// TestTurnSendsTheAttachedImage is the wiring: a line with a reference reaches
-// the provider as a message that carries the image, without the reader doing
-// anything but typing the path.
+// TestTurnSendsTheAttachedImage checks the prompt the provider receives after an image pick.
 func TestTurnSendsTheAttachedImage(t *testing.T) {
 	cwd := t.TempDir()
 	if err := os.WriteFile(filepath.Join(cwd, "shot.png"), tinyPNG, 0o644); err != nil {
@@ -293,7 +293,11 @@ func TestTurnSendsTheAttachedImage(t *testing.T) {
 	}
 	application, provider := attachApp(t, cwd, faux.Response{Text: "a cat"})
 
-	if err := tuiMainTurn(context.Background(), application, "what is @shot.png", (&homeSink{}).sink()); err != nil {
+	picks := attachSuggestions("what is @shot", cwd)
+	if len(picks) != 1 || !isAttachImage(picks[0].Path) {
+		t.Fatalf("image pick = %+v", picks)
+	}
+	if err := tuiMainTurn(context.Background(), application, "what is @shot.png", (&homeSink{}).sink(), picks[0].Path); err != nil {
 		t.Fatalf("turn: %v", err)
 	}
 
@@ -311,6 +315,56 @@ func TestTurnSendsTheAttachedImage(t *testing.T) {
 	}
 	if blocks[2].Type != wire.ContentImage || blocks[2].MIMEType != "image/png" {
 		t.Fatalf("no image reached the provider: %+v", blocks[2])
+	}
+}
+
+func TestInteractivePathsRemainPromptText(t *testing.T) {
+	cwd := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cwd, "shot.png"), tinyPNG, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cwd, "main.go"), []byte("package main"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	line := `看看 @shot.png @main.go @./ @missing @"带空格的目录/"`
+	t.Run("main", func(t *testing.T) {
+		application, provider := attachApp(t, cwd, faux.Response{Text: "ok"})
+		if err := tuiMainTurn(context.Background(), application, line, (&homeSink{}).sink()); err != nil {
+			t.Fatal(err)
+		}
+		assertPlainAttachmentPrompt(t, provider, line)
+	})
+	t.Run("side command", func(t *testing.T) {
+		application, provider := attachApp(t, cwd, faux.Response{Text: "ok"})
+		state := &sideState{}
+		render := newRenderer(io.Discard, io.Discard, false)
+		if _, err := replCommand(context.Background(), application, state, "/btw "+line, models{}, nil, nil, emptyPrompts(), io.Discard, render, mcpState{}, nil); err != nil {
+			t.Fatal(err)
+		}
+		assertPlainAttachmentPrompt(t, provider, line)
+	})
+}
+
+func assertPlainAttachmentPrompt(t *testing.T, provider *faux.Provider, want string) {
+	t.Helper()
+	calls := provider.Calls()
+	if len(calls) != 1 {
+		t.Fatalf("made %d requests, want one", len(calls))
+	}
+	messages := calls[0].Messages
+	content := messages[len(messages)-1].Content
+	if !content.IsPlain() || content.PlainText() != want {
+		t.Fatalf("content = %+v, want plain %q", content, want)
+	}
+}
+
+func TestSelectedImageChangedBeforeSend(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "shot.png")
+	if err := os.WriteFile(path, []byte("now text"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := interactiveMessage("@shot.png", []string{path}); err == nil || !strings.Contains(err.Error(), "no longer a supported image") {
+		t.Fatalf("error = %v, want unsupported image error", err)
 	}
 }
 

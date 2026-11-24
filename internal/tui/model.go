@@ -80,11 +80,20 @@ var ErrExit = errors.New("exit")
 
 // Runner performs one submitted line. cmd/atlas binds it to the command table
 // and to app.Ask; the interface knows neither.
-type Runner func(ctx context.Context, line string, sink Sink) error
+type Runner func(ctx context.Context, prompt Prompt, sink Sink) error
+
+// SubagentRuntime provides session identity and result-turn admission to the screen.
+type SubagentRuntime struct {
+	Session func() (id, file string)
+	Ready   func() bool
+	Run     func(context.Context, Sink) error
+}
 
 // Config is what the interface needs to start.
 type Config struct {
-	Styles Styles
+	// Context is the lifetime of the screen's turns.
+	Context context.Context
+	Styles  Styles
 
 	// Layout is the geometry — the gaps, the boxes, how much reasoning is
 	// shown. An all-zero value is DefaultLayout(), so a host with no opinion
@@ -103,6 +112,9 @@ type Config struct {
 
 	// Run handles one submitted line.
 	Run Runner
+
+	// Subagents supports background updates and internally initiated main turns.
+	Subagents *SubagentRuntime
 
 	// Toggle moves the prompt to the other conversation. It reports which one it
 	// is now, and the line the switch is worth saying: the host owns the
@@ -138,6 +150,9 @@ type Config struct {
 	// suggestions and how much of the line each one replaces.
 	Attach func(line string) []Suggestion
 
+	// IsImage checks the file behind a selected suggestion before staging it.
+	IsImage func(path string) bool
+
 	// Welcome is the home screen for a view: what it says about this
 	// conversation before the first line is typed. It is asked per frame
 	// rather than handed over once because the side conversation knows what it
@@ -171,7 +186,12 @@ type EventMsg struct {
 // land in a transcript nobody is reading if it were pinned to the old view.
 type NoteMsg struct {
 	Text string
+	view *int
 }
+
+type subagentMsg struct{ update wire.SubagentUpdate }
+
+type checkSubagentResultsMsg struct{}
 
 // AnswerMsg replays one answer into the transcript. It carries the text of an
 // answer that happened before this screen existed, so the block it appends is
@@ -290,7 +310,11 @@ type Model struct {
 	// because the prompt can move between views while a turn streams, and the
 	// transcript that has to be told the turn was stopped is the one the turn
 	// started in.
-	turnView int
+	turnView     int
+	internalTurn bool
+
+	mainSessionID, mainSessionFile string
+	subagentWake                   bool
 
 	// picks is the command palette for what is in the composer, and picked is
 	// the row Tab and Enter would take. It is not part of view: two views can
@@ -308,12 +332,6 @@ type Model struct {
 	// "press it twice", not "press it twice within a second", and a key in
 	// between is the reader saying they are still here.
 	exitArmed bool
-
-	// interruptArmed records that the last key was a stop key during a turn,
-	// which is what makes the next one stop it. It is the same rule as the exit
-	// gesture and for a sharper reason: a turn cannot be resumed, so a slip that
-	// ends one costs the answer that was halfway written.
-	interruptArmed bool
 
 	approval *AskMsg
 	// chooser is the list the command that just ran is waiting on, and chosen
@@ -370,6 +388,9 @@ type view struct {
 
 // New builds the interface.
 func New(cfg Config) Model {
+	if cfg.Context == nil {
+		cfg.Context = context.Background()
+	}
 	if cfg.Placeholder == "" {
 		cfg.Placeholder = "Ask anything · /help for commands"
 	}
@@ -379,12 +400,25 @@ func New(cfg Config) Model {
 		m.views[i].transcript = NewTranscript()
 		m.views[i].composer = NewComposer()
 	}
+	m.refreshSubagentSession()
 	return m
 }
 
-// Init implements tea.Model. The first frame waits for the terminal size, which
-// bubbletea sends on its own.
-func (m Model) Init() tea.Cmd { return nil }
+// Init implements tea.Model and checks for results in the starting session.
+func (m Model) Init() tea.Cmd {
+	if m.cfg.Subagents == nil {
+		return nil
+	}
+	return func() tea.Msg { return checkSubagentResultsMsg{} }
+}
+
+// SendSubagentUpdate queues a background update for the screen's update loop.
+func (m Model) SendSubagentUpdate(ctx context.Context, update wire.SubagentUpdate) {
+	select {
+	case m.host.events <- subagentMsg{update: update}:
+	case <-ctx.Done():
+	}
+}
 
 // Update implements tea.Model.
 //
@@ -415,7 +449,7 @@ func (m Model) handle(msg tea.Msg) (Model, tea.Cmd) {
 		return m, nil
 
 	case tea.PasteMsg:
-		if !m.busy {
+		if !m.busy || (m.internalTurn && !m.modal()) {
 			m.composer().Insert(msg.Content)
 		}
 		return m, nil
@@ -425,9 +459,32 @@ func (m Model) handle(msg tea.Msg) (Model, tea.Cmd) {
 		m.view(msg.View).transcript.Apply(msg.Event)
 		return m, nil
 
+	case subagentMsg:
+		m.host.armed = false
+		update := msg.update
+		if m.mainSessionID == "" || update.SessionID != m.mainSessionID || update.SessionFile != m.mainSessionFile {
+			return m, nil
+		}
+		m.view(ViewMain).transcript.showSubagent(update, false)
+		if subagentFinished(update.State) {
+			if m.busy {
+				m.subagentWake = true
+				return m, nil
+			}
+			return m.startSubagentResults()
+		}
+		return m, nil
+
+	case checkSubagentResultsMsg:
+		return m.startSubagentResults()
+
 	case NoteMsg:
 		m.host.armed = false
-		m.view(m.active).transcript.Append(Block{Role: RoleNotice, Text: msg.Text})
+		index := m.active
+		if msg.view != nil {
+			index = *msg.view
+		}
+		m.view(index).transcript.Append(Block{Role: RoleNotice, Text: msg.Text})
 		return m, m.repaint()
 	case AnswerMsg:
 		m.host.armed = false
@@ -453,6 +510,11 @@ func (m Model) handle(msg tea.Msg) (Model, tea.Cmd) {
 		}
 		m.view(msg.View).transcript.Reset()
 		m.view(msg.View).offset = 0
+		if msg.View == ViewMain {
+			// The host may still be replaying the new session. Bind again when
+			// the command releases the turn slot.
+			m.mainSessionID, m.mainSessionFile = "", ""
+		}
 		return m, nil
 
 	case FlashMsg:
@@ -487,10 +549,6 @@ func (m Model) handle(msg tea.Msg) (Model, tea.Cmd) {
 		m.busy = false
 		m.cancel = nil
 		m.host.armed = false
-		// A turn that finished on its own must not leave the stop gesture
-		// armed for the next one: the second press has to belong to the turn
-		// it would end.
-		m.interruptArmed = false
 		// Whatever the event stream left open is closed here: a turn that was
 		// cancelled never sends agent_end, and a block left open would spin
 		// forever.
@@ -502,11 +560,18 @@ func (m Model) handle(msg tea.Msg) (Model, tea.Cmd) {
 		if msg.Err != nil {
 			m.note(msg.View, msg.Err)
 		}
-		return m, m.repaint()
+		checkResults := !errors.Is(msg.Err, context.Canceled) && (!m.internalTurn || msg.Err == nil || m.subagentWake)
+		m.internalTurn = false
+		m.refreshSubagentSession()
+		m.repaint()
+		if checkResults {
+			return m.startSubagentResults()
+		}
+		return m, nil
 
 	case AskMsg:
 		m.host.armed = false
-		if m.approval != nil || m.chooser != nil {
+		if m.approval != nil || m.chooser != nil || m.busy && m.cancel == nil {
 			// A second question cannot be answered: the modal on screen owns
 			// the keys. Denying is the only safe default when the reader
 			// cannot be asked.
@@ -519,7 +584,7 @@ func (m Model) handle(msg tea.Msg) (Model, tea.Cmd) {
 
 	case PickMsg:
 		m.host.armed = false
-		if m.chooser != nil || m.approval != nil {
+		if m.chooser != nil || m.approval != nil || m.busy && m.cancel == nil {
 			// One list at a time, for the same reason: one modal, one answer.
 			sendPick(msg.Reply, PickAnswer{})
 			return m, nil
@@ -742,11 +807,7 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 	ctrl := key.Mod&tea.ModCtrl != 0
 	alt := key.Mod&tea.ModAlt != 0
 	shift := key.Mod&tea.ModShift != 0
-	// A stop key is a key that can reach the turn. A modal owns the keys the
-	// turn is blocked on, so while one is up Esc and Ctrl+C are its answer and
-	// not half of the stop gesture — the same key cannot mean "no" and "stop"
-	// on one screen.
-	stopKey := !m.modal() && ((ctrl && isRune(key, 'c')) || key.Code == tea.KeyEscape)
+	ctrlC := ctrl && isRune(key, 'c')
 
 	// Only another Ctrl+C keeps the exit armed; anything else is the reader
 	// going back to work.
@@ -757,18 +818,17 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 	// cleared here rather than where the frame is drawn because "how long a
 	// receipt stays" is a question about keys, not about painting.
 	m.copied = ""
-	// The same rule for the stop gesture, and it has to hold for every key: a
-	// key spent on a menu or a question ends the arm too, because "the second
-	// press right after the first" is the whole safety of a gesture that cannot
-	// be undone.
-	if !stopKey {
-		m.interruptArmed = false
-	}
-
 	// The list comes first: it is a modal too, and while it is up the answer is
 	// a whole row rather than a line.
 	if m.chooser != nil {
 		return m.handlePick(key)
+	}
+
+	if m.busy && (ctrlC || key.Code == tea.KeyEscape && m.approval == nil) {
+		if m.interrupt() {
+			return m, m.repaint()
+		}
+		return m, nil
 	}
 
 	if m.approval != nil {
@@ -801,21 +861,6 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 		// right order: the incremental path was told the box had rows the
 		// transcript does not.
 		return m, m.repaint()
-	}
-
-	// A stop key during a turn is one gesture in two halves. Nothing below this
-	// point can run while a turn is in flight anyway — Enter is refused, the
-	// keys that are commands were spent on the turn, and only the composer took
-	// text — so the gesture is answered here and never falls through.
-	if m.busy && stopKey {
-		if !m.interruptArmed {
-			m.interruptArmed = true
-			return m, nil
-		}
-		if m.interrupt() {
-			return m, m.repaint()
-		}
-		return m, nil
 	}
 
 	switch {
@@ -882,17 +927,17 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 		// the middle of a sentence, so the sentence is not finished and Enter
 		// spends itself on the word. Pressing it again sends, because by then
 		// there is nothing left to fill.
-		if m.complete() && m.attach {
+		if m.complete(false) && m.attach {
 			return m, nil
 		}
-		line, ok := composer.Take()
+		prompt, ok := composer.Take()
 		if !ok {
 			return m, nil
 		}
-		return m.start(line)
+		return m.start(prompt)
 
 	case tea.KeyTab:
-		m.complete()
+		m.complete(true)
 		return m, nil
 
 	case tea.KeyUp:
@@ -1164,31 +1209,51 @@ func pickStart(msg *PickMsg) int {
 	return 0
 }
 
-// start launches one line. It returns no command of its own: the reader that is
-// already waiting picks the turn up.
-//
-// The work runs in its own goroutine because it blocks on the network, the tools
-// and the reader; everything it produces comes back as a message, which is the
-// only way the model is allowed to change.
-func (m Model) start(line string) (Model, tea.Cmd) {
+// start records a submitted line and launches its turn.
+func (m Model) start(prompt Prompt) (Model, tea.Cmd) {
 	if m.cfg.Run == nil {
 		m.note(m.active, errors.New("this view has no conversation"))
 		return m, nil
 	}
-	index := m.active
+	m.view(m.active).transcript.Append(Block{Role: RoleUser, Text: prompt.Text})
+	m.flash = ""
+	return m.startTurn(m.active, false, func(ctx context.Context, sink Sink) error {
+		return m.cfg.Run(ctx, prompt, sink)
+	})
+}
+
+// refreshSubagentSession runs while the host is between turns, when no command
+// can be replacing the session.
+func (m *Model) refreshSubagentSession() {
+	if runtime := m.cfg.Subagents; runtime != nil {
+		m.mainSessionID, m.mainSessionFile = runtime.Session()
+	}
+}
+
+func (m Model) startSubagentResults() (Model, tea.Cmd) {
+	runtime := m.cfg.Subagents
+	if runtime == nil || m.busy || m.modal() || m.quit {
+		return m, nil
+	}
+	m.subagentWake = false
+	if !runtime.Ready() {
+		return m, nil
+	}
+	return m.startTurn(ViewMain, true, runtime.Run)
+}
+
+// startTurn serializes commands, prompts and background results through the
+// same turn slot. Background results can answer into the main transcript while
+// the composer stays in the side view.
+func (m Model) startTurn(index int, internal bool, run func(context.Context, Sink) error) (Model, tea.Cmd) {
 	events := m.host.events
-	m.view(index).transcript.Append(Block{Role: RoleUser, Text: line})
 	m.busy = true
 	m.busySeq++
 	m.busyTicks = 0
 	m.turnView = index
-	m.interruptArmed = false
-	// The page's line about the last command is spent by saying something: it
-	// was the answer to a question the reader had, and this turn is the next
-	// one.
-	m.flash = ""
+	m.internalTurn = internal
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(m.cfg.Context)
 	m.cancel = cancel
 
 	sink := Sink{
@@ -1196,7 +1261,11 @@ func (m Model) start(line string) (Model, tea.Cmd) {
 			events <- EventMsg{View: index, Event: event}
 		},
 		Note: func(text string) {
-			events <- NoteMsg{Text: text}
+			msg := NoteMsg{Text: text}
+			if internal {
+				msg.view = &index
+			}
+			events <- msg
 		},
 		Answer: func(text string) {
 			events <- AnswerMsg{Text: text}
@@ -1244,14 +1313,12 @@ func (m Model) start(line string) (Model, tea.Cmd) {
 	}
 
 	go func() {
-		err := m.cfg.Run(ctx, line, sink)
+		err := run(ctx, sink)
 		cancel()
 		events <- TurnMsg{View: index, Err: err}
 	}()
 
-	// The tick chain starts here and nowhere else, so it is exactly one chain
-	// per turn: the beat that arrives after the turn ended is what ends it.
-	return m, busyTick(m.busySeq)
+	return m, tea.Batch(m.listen(), busyTick(m.busySeq))
 }
 
 // spinnerFrames is the busy mark's cycle: the braille dots spinner, one cell
@@ -1337,7 +1404,11 @@ func wait(events <-chan tea.Msg) tea.Cmd {
 // whole screen redrawn — the box covered rows the transcript was never asked to
 // repaint, and closing it makes every one of them shorter.
 func (m *Model) interrupt() bool {
-	m.interruptArmed = false
+	cancel := m.cancel
+	if cancel != nil {
+		cancel()
+		m.cancel = nil
+	}
 	closed := false
 	if m.approval != nil {
 		answer(m.approval.Reply, AskAnswer{})
@@ -1352,13 +1423,13 @@ func (m *Model) interrupt() bool {
 		m.matches = nil
 		closed = true
 	}
-	if m.cancel == nil {
+	if cancel == nil {
 		return closed
 	}
-	m.cancel()
-	m.cancel = nil
 	m.view(m.turnView).transcript.Stop()
-	m.restore(m.cfg.Interrupt)
+	if !m.internalTurn {
+		m.restore(m.cfg.Interrupt)
+	}
 	return closed
 }
 
@@ -1376,11 +1447,15 @@ func (m *Model) restore(queued func() []string) {
 	if len(lines) == 0 {
 		return
 	}
+	composer := m.composer()
 	text := strings.Join(lines, " ")
-	if draft := strings.TrimSpace(m.composer().String()); draft != "" {
-		text += " " + draft
+	if composer.Empty() {
+		composer.Set(text)
+		return
 	}
-	m.composer().Set(text)
+	composer.trimSpace()
+	composer.edit(0, 0, []rune(text+" "))
+	composer.End()
 }
 
 // note records a failure the model has no block for: a turn that never started,
@@ -1521,8 +1596,9 @@ func (m *Model) refreshSuggest() {
 	var picks []Suggestion
 	attach := false
 	if !m.busy && m.approval == nil && m.chooser == nil {
-		line := m.composer().String()
-		if m.cfg.Attach != nil {
+		composer := m.composer()
+		line := composer.String()
+		if m.cfg.Attach != nil && composer.cur == composer.Len() {
 			picks = m.cfg.Attach(line)
 			attach = len(picks) > 0
 		}
@@ -1573,22 +1649,33 @@ func (m *Model) pick(delta int) bool {
 // token being typed — and leaves the sentence around it untouched. That is what
 // Replace is for, and it is why the interface can fill one in without knowing
 // that a path is what it filled.
-func (m *Model) complete() bool {
+func (m *Model) complete(explicit bool) bool {
 	if len(m.picks) == 0 {
 		return false
 	}
 	pick := m.picks[m.picked]
-	line := m.composer().String()
+	composer := m.composer()
+	line := composer.String()
 	if pick.Replace > 0 {
-		buf := []rune(line)
-		if pick.Replace > len(buf) {
+		end := composer.Len()
+		start := end - pick.Replace
+		if start < 0 {
 			return false
 		}
-		filled := string(buf[:len(buf)-pick.Replace]) + pick.Name
-		if filled == line {
+		unchanged := string(composer.buf[start:]) == pick.Name
+		if unchanged && !explicit {
 			return false
 		}
-		m.composer().Set(filled)
+		name := []rune(pick.Name)
+		if pick.Path != "" && m.cfg.IsImage != nil && m.cfg.IsImage(pick.Path) {
+			composer.edit(start, end, append(name, ' '))
+			composer.images = append(composer.images, imagePick{start: start, end: start + len(name), path: pick.Path})
+			return true
+		}
+		if unchanged {
+			return false
+		}
+		composer.edit(start, end, name)
 		return true
 	}
 	filled := pick.Name
@@ -1730,14 +1817,10 @@ func (m *Model) placeholder() string {
 		// while it is up: the usual stop hint beside it would give Esc two
 		// meanings on one screen, the way the approval box refuses to.
 		return ""
-	case m.interruptArmed:
-		// The one place the second press is announced. It takes the
-		// placeholder's slot for the reason the exit hint does: the hint has to
-		// be somewhere, and this row is where the keys of the running turn are
-		// already advertised.
-		return "esc again to interrupt"
+	case m.busy && m.cancel == nil:
+		return "stopping…"
 	case m.busy:
-		return "esc twice to interrupt"
+		return "esc to interrupt"
 	case m.exitArmed:
 		// The one place the second Ctrl+C is announced. It takes the
 		// placeholder's slot because the composer is empty by then — arming
